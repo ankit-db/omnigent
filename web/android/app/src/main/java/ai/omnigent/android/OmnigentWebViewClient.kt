@@ -41,6 +41,8 @@ internal class OmnigentWebViewClient(
     private val onMainFrameHttpError: (statusCode: Int) -> Unit = {},
     private val workspaceSession: () -> DatabricksWebSession? = { null },
     private val onWorkspaceSessionInvalid: (status: Int?) -> Unit = {},
+    private val onWorkspaceSignOut: () -> Unit = {},
+    private val bridgeScript: () -> String = { NativeBridgeScript.source },
 ) : WebViewClient() {
     // Bare-root -> /omnigent bounces since the last app page loaded; see
     // workspaceRootTarget for why they're capped.
@@ -60,7 +62,13 @@ internal class OmnigentWebViewClient(
         val pinned = pinnedOrigin()
         val session = workspaceSession()
         if (session != null && isHttpScheme(scheme)) {
-            val accepted = runCatching { url?.let(::URI)?.let(session::navigationUri) }.getOrNull()
+            val parsed = runCatching { url?.let(::URI) }.getOrNull()
+            if (parsed != null && session.isSignOutUri(parsed)) {
+                view.stopLoading()
+                onWorkspaceSignOut()
+                return
+            }
+            val accepted = runCatching { parsed?.let(session::navigationUri) }.getOrNull()
             if (accepted == null) {
                 view.stopLoading()
                 onWorkspaceSessionInvalid(null)
@@ -120,6 +128,11 @@ internal class OmnigentWebViewClient(
         isReload: Boolean,
     ) {
         super.doUpdateVisitedHistory(view, url, isReload)
+        val parsed = runCatching { url?.let(::URI) }.getOrNull()
+        if (parsed != null && workspaceSession()?.isSignOutUri(parsed) == true) {
+            onWorkspaceSignOut()
+            return
+        }
         if (originOf(url) != pinnedOrigin()) return
         val target = workspaceRootTarget(url) ?: return
         bounce(view, target)
@@ -145,7 +158,7 @@ internal class OmnigentWebViewClient(
             view.evaluateJavascript(WorkspaceChromeScript.source, null)
         }
         if (onPinnedOrigin && shouldInjectBridgeAtPageReady()) {
-            view.evaluateJavascript(NativeBridgeScript.source) { onPageReady(url) }
+            view.evaluateJavascript(bridgeScript()) { onPageReady(url) }
             return
         }
         onPageReady(url)
@@ -170,7 +183,12 @@ internal class OmnigentWebViewClient(
 
         val session = workspaceSession()
         if (session != null) {
+            // Android's Uri allows characters java.net.URI rejects, such as `|`; those fail closed.
             val parsed = runCatching { URI(url.toString()) }.getOrNull()
+            if (parsed != null && session.isSignOutUri(parsed)) {
+                onWorkspaceSignOut()
+                return true
+            }
             val accepted = parsed?.let { runCatching { session.navigationUri(it) }.getOrNull() }
             if (accepted != null) return false
             // A workspace login page signs in again natively, in this profile, not in a browser.
