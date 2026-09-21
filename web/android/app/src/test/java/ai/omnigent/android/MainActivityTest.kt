@@ -75,6 +75,20 @@ class MainActivityTest {
     }
 
     @Test
+    fun `workspace with missing OAuth configuration fails closed before WebView load`() {
+        val workspace = "https://dbc-123.cloud.databricks.com/omnigent?o=42"
+        ServerStore(ApplicationProvider.getApplicationContext()).connect(workspace)
+
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+
+        assertTrue(activity.isFinishing)
+        val setup = shadowOf(activity).nextStartedActivity
+        assertEquals(ConnectActivity::class.java.name, setup.component!!.className)
+        assertEquals(workspace, setup.getStringExtra(ConnectActivity.EXTRA_SERVER_URL))
+        assertTrue(setup.getStringExtra(ConnectActivity.EXTRA_ERROR)!!.contains("client ID"))
+    }
+
+    @Test
     fun `webview leaves algorithmic darkening disabled`() {
         ServerStore(ApplicationProvider.getApplicationContext()).connect("https://example.com")
         val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()

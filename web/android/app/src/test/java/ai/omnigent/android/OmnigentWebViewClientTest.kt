@@ -140,7 +140,7 @@ class OmnigentWebViewClientTest {
     fun `idp redirect loads inline when the server authenticates in the webview`() {
         val webView = RecordingWebView(ApplicationProvider.getApplicationContext())
         var logins = 0
-        val client = client(pinnedOrigin = DATABRICKS_ORIGIN, onLoginRequired = { logins++ })
+        val client = client(pinnedOrigin = DATABRICKS_APP_ORIGIN, onLoginRequired = { logins++ })
 
         val handled = client.shouldOverrideUrlLoading(webView, request(IDP_URL))
 
@@ -163,9 +163,9 @@ class OmnigentWebViewClientTest {
     @Test
     fun `tapped external link on the app page leaves the webview`() {
         val webView = RecordingWebView(ApplicationProvider.getApplicationContext())
-        webView.currentUrl = "$DATABRICKS_ORIGIN/app"
+        webView.currentUrl = "$DATABRICKS_APP_ORIGIN/app"
         var logins = 0
-        val client = client(pinnedOrigin = DATABRICKS_ORIGIN, onLoginRequired = { logins++ })
+        val client = client(pinnedOrigin = DATABRICKS_APP_ORIGIN, onLoginRequired = { logins++ })
 
         val handled =
             client.shouldOverrideUrlLoading(
@@ -182,7 +182,7 @@ class OmnigentWebViewClientTest {
         val webView = RecordingWebView(ApplicationProvider.getApplicationContext())
         webView.currentUrl = IDP_URL // already mid-login on the IdP
         var logins = 0
-        val client = client(pinnedOrigin = DATABRICKS_ORIGIN, onLoginRequired = { logins++ })
+        val client = client(pinnedOrigin = DATABRICKS_APP_ORIGIN, onLoginRequired = { logins++ })
 
         // A button press inside the IdP is off-origin AND gesture-driven; it must
         // not be mistaken for an external link.
@@ -200,7 +200,7 @@ class OmnigentWebViewClientTest {
     fun `off-origin landing keeps loading when the server authenticates in the webview`() {
         val webView = RecordingWebView(ApplicationProvider.getApplicationContext())
         var logins = 0
-        val client = client(pinnedOrigin = DATABRICKS_ORIGIN, onLoginRequired = { logins++ })
+        val client = client(pinnedOrigin = DATABRICKS_APP_ORIGIN, onLoginRequired = { logins++ })
 
         client.onPageStarted(webView, IDP_URL, null)
 
@@ -218,6 +218,93 @@ class OmnigentWebViewClientTest {
 
         assertTrue(webView.stopLoadingCalled)
         assertEquals(1, logins)
+    }
+
+    @Test
+    fun `native workspace session blocks authentication navigation without generic login`() {
+        val webView = RecordingWebView(ApplicationProvider.getApplicationContext())
+        webView.currentUrl = "$DATABRICKS_ORIGIN/omnigent"
+        var invalid = 0
+        var genericLogins = 0
+        val session = workspaceSession()
+        val client =
+            client(
+                pinnedOrigin = DATABRICKS_ORIGIN,
+                onLoginRequired = { genericLogins++ },
+                workspaceSession = { session },
+                onWorkspaceSessionInvalid = { invalid++ },
+            )
+
+        val handled = client.shouldOverrideUrlLoading(webView, request("$DATABRICKS_ORIGIN/login"))
+        // Tapped from the workspace page, it still signs in natively rather than in a browser.
+        val tapped =
+            client.shouldOverrideUrlLoading(
+                webView,
+                request("$DATABRICKS_ORIGIN/login", hasGesture = true),
+            )
+
+        assertTrue(handled)
+        assertTrue(tapped)
+        assertEquals(2, invalid)
+        assertEquals(0, genericLogins)
+        assertNull(
+            shadowOf(
+                ApplicationProvider.getApplicationContext<android.app.Application>(),
+            ).nextStartedActivity,
+        )
+    }
+
+    @Test
+    fun `native workspace session accepts its bootstrapped app origins`() {
+        val webView = RecordingWebView(ApplicationProvider.getApplicationContext())
+        val session = workspaceSession()
+        var invalid = 0
+        var genericLogins = 0
+        var navigations = 0
+        val client =
+            client(
+                pinnedOrigin = DATABRICKS_ORIGIN,
+                onLoginRequired = { genericLogins++ },
+                onNavigationStarted = { navigations++ },
+                workspaceSession = { session },
+                onWorkspaceSessionInvalid = { invalid++ },
+            )
+        val alias = "https://alias.cloud.databricks.com/omnigent/c/abc?o=42"
+
+        val handled = client.shouldOverrideUrlLoading(webView, request(alias))
+        client.onPageStarted(webView, alias, null)
+
+        assertFalse(handled)
+        assertFalse(webView.stopLoadingCalled)
+        assertEquals(0, invalid)
+        assertEquals(0, genericLogins)
+        assertEquals(1, navigations)
+    }
+
+    @Test
+    fun `native workspace main-frame 401 and 403 renew the session, other errors leave`() {
+        val webView = RecordingWebView(ApplicationProvider.getApplicationContext())
+        val statuses = mutableListOf<Int?>()
+        val otherErrors = mutableListOf<Int>()
+        val client =
+            client(
+                pinnedOrigin = DATABRICKS_ORIGIN,
+                onMainFrameHttpError = otherErrors::add,
+                workspaceSession = { workspaceSession() },
+                onWorkspaceSessionInvalid = { statuses += it },
+            )
+
+        listOf(401, 403, 500).forEach { status ->
+            client.onReceivedHttpError(
+                webView,
+                request("$DATABRICKS_ORIGIN/omnigent"),
+                httpError(status),
+            )
+        }
+
+        assertEquals(listOf(401, 403), statuses)
+        assertTrue(webView.stopLoadingCalled)
+        assertEquals(listOf(500), otherErrors)
     }
 
     @Test
@@ -378,6 +465,8 @@ class OmnigentWebViewClientTest {
         onPageReady: (String?) -> Unit = {},
         onNavigationStarted: () -> Unit = {},
         onMainFrameHttpError: (Int) -> Unit = {},
+        workspaceSession: () -> DatabricksWebSession? = { null },
+        onWorkspaceSessionInvalid: (Int?) -> Unit = {},
     ) = OmnigentWebViewClient(
         pinnedOrigin = { pinnedOrigin },
         shouldInjectBridgeAtPageReady = { shouldInjectBridgeAtPageReady },
@@ -386,7 +475,24 @@ class OmnigentWebViewClientTest {
         onLoginRequired = onLoginRequired,
         onRendererGone = onRendererGone,
         onMainFrameHttpError = onMainFrameHttpError,
+        workspaceSession = workspaceSession,
+        onWorkspaceSessionInvalid = onWorkspaceSessionInvalid,
     )
+
+    private fun workspaceSession(): DatabricksWebSession {
+        val configuration =
+            DatabricksOAuthConfiguration(
+                "client",
+                java.net.URI("https://login.databricks.com/mobile-redirect"),
+            )
+        return DatabricksWebSession(
+            java.net.URI("$DATABRICKS_ORIGIN/omnigent?o=42"),
+            emptyList(),
+            setOf(DATABRICKS_ORIGIN, "https://alias.cloud.databricks.com"),
+            configuration,
+            "42",
+        )
+    }
 
     private fun request(
         url: String,
@@ -452,6 +558,7 @@ class OmnigentWebViewClientTest {
         const val PINNED_ORIGIN = "https://example.com"
         const val PINNED_URL = "$PINNED_ORIGIN/app"
         const val DATABRICKS_ORIGIN = "https://myshard.cloud.databricks.com"
+        const val DATABRICKS_APP_ORIGIN = "https://myapp.databricksapps.com"
         const val IDP_URL = "https://databricks.okta.com/authorize?state=abc"
     }
 }

@@ -10,6 +10,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import java.net.URI
 
 /**
  * Signals [onPageReady] once a pinned-origin page finishes loading and decides
@@ -30,7 +31,7 @@ import android.webkit.WebViewClient
  * [onRendererGone], so the host can rebuild the WebView instead of letting
  * Android kill the whole app.
  */
-class OmnigentWebViewClient(
+internal class OmnigentWebViewClient(
     private val pinnedOrigin: () -> String?,
     private val shouldInjectBridgeAtPageReady: () -> Boolean,
     private val onPageReady: (url: String?) -> Unit,
@@ -38,6 +39,8 @@ class OmnigentWebViewClient(
     private val onRendererGone: (view: WebView, didCrash: Boolean) -> Unit,
     private val onNavigationStarted: () -> Unit = {},
     private val onMainFrameHttpError: (statusCode: Int) -> Unit = {},
+    private val workspaceSession: () -> DatabricksWebSession? = { null },
+    private val onWorkspaceSessionInvalid: (status: Int?) -> Unit = {},
 ) : WebViewClient() {
     // Bare-root -> /omnigent bounces since the last app page loaded; see
     // workspaceRootTarget for why they're capped.
@@ -55,6 +58,15 @@ class OmnigentWebViewClient(
         val origin = originOf(url)
         val scheme = url?.let { Uri.parse(it).scheme?.lowercase() }
         val pinned = pinnedOrigin()
+        val session = workspaceSession()
+        if (session != null && isHttpScheme(scheme)) {
+            val accepted = runCatching { url?.let(::URI)?.let(session::navigationUri) }.getOrNull()
+            if (accepted == null) {
+                view.stopLoading()
+                onWorkspaceSessionInvalid(null)
+                return
+            }
+        }
 
         // A real http(s) navigation to a foreign origin means the server bounced
         // us to the IdP and shouldOverrideUrlLoading didn't catch the redirect.
@@ -67,7 +79,9 @@ class OmnigentWebViewClient(
         // load of the pinned server (e.g. it's offline), NOT an IdP redirect —
         // don't misread it as a bounce and pop the browser. Mirror the http(s)
         // gate in shouldOverrideUrlLoading.
+        // A native workspace session already vetted this URL above, including its aliases.
         if (
+            session == null &&
             isHttpScheme(scheme) &&
             origin != pinned &&
             !serverAuthentication(pinned).usesInWebViewAuth
@@ -154,6 +168,22 @@ class OmnigentWebViewClient(
             return true
         }
 
+        val session = workspaceSession()
+        if (session != null) {
+            val parsed = runCatching { URI(url.toString()) }.getOrNull()
+            val accepted = parsed?.let { runCatching { session.navigationUri(it) }.getOrNull() }
+            if (accepted != null) return false
+            // A workspace login page signs in again natively, in this profile, not in a browser.
+            val signIn =
+                parsed?.let { runCatching { session.isAuthenticationUri(it) }.getOrNull() } == true
+            if (!signIn && request.hasGesture() && isCurrentWorkspacePage(view.url, session)) {
+                runCatching { view.context.startActivity(Intent(Intent.ACTION_VIEW, url)) }
+            } else {
+                onWorkspaceSessionInvalid(null)
+            }
+            return true
+        }
+
         // Same-origin app pages load in the WebView, except a landing on the bare
         // workspace root, which belongs to Databricks rather than the app.
         val origin = originOf(url.toString())
@@ -197,9 +227,20 @@ class OmnigentWebViewClient(
     ) {
         super.onReceivedHttpError(view, request, errorResponse)
         if (!request.isForMainFrame) return
+        // A native workspace session renews itself when the workspace rejects it.
+        if (workspaceSession() != null && errorResponse.statusCode in setOf(401, 403)) {
+            view.stopLoading()
+            onWorkspaceSessionInvalid(errorResponse.statusCode)
+            return
+        }
         if (originOf(request.url.toString()) != pinnedOrigin()) return
         onMainFrameHttpError(errorResponse.statusCode)
     }
+
+    private fun isCurrentWorkspacePage(
+        url: String?,
+        session: DatabricksWebSession,
+    ): Boolean = runCatching { url?.let(::URI)?.let(session::navigationUri) }.getOrNull() != null
 
     /**
      * The renderer process died — crashed, or reclaimed by the system under
