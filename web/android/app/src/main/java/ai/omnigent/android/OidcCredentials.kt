@@ -103,7 +103,7 @@ internal sealed class OidcSignInException(
  */
 internal class OidcCredentials(
     private val store: OidcCredentialStorage,
-    private val pending: OidcPendingSignInStore,
+    private val pending: OidcPendingSignIns,
     private val transport: OAuthTransport = UrlConnectionOAuthTransport(NETWORK_TIMEOUT_MS),
     private val verifyTransport: OAuthTransport = UrlConnectionOAuthTransport(VERIFY_TIMEOUT_MS),
     private val executor: Executor = Executors.newCachedThreadPool(),
@@ -119,6 +119,12 @@ internal class OidcCredentials(
 
     private val refreshes = mutableMapOf<String, CompletableFuture<OidcSessionToken>>()
     private var handedOff: CompletedSignIn? = null
+
+    // Per-origin sign-out count, so an exchange in flight can't store a grant afterwards.
+    private val signOutGenerations = mutableMapOf<String, Int>()
+
+    // The sign-out generation each attempt began under, for attempts begun in this process.
+    private val attemptGenerations = mutableMapOf<String, Int>()
 
     // Bumped when an attempt starts or is cancelled; an exchange still running for an older
     // attempt then neither keeps its grant nor hands its session to the shell.
@@ -139,6 +145,9 @@ internal class OidcCredentials(
             } catch (_: CredentialStorageException) {
                 throw OidcSignInException.StorageUnavailable()
             }
+        // A later sign-out of this origin ends the attempt even if its record survives.
+        attemptGenerations.clear()
+        attemptGenerations[attempt.id] = signOutGeneration(server.origin)
         return server.authorizationUri(attempt.state, OAuthSupport.challenge(attempt.verifier))
     }
 
@@ -147,6 +156,7 @@ internal class OidcCredentials(
     fun cancelSignIn() {
         handedOff = null
         attemptEpoch++
+        attemptGenerations.clear()
         runCatching { pending.clear() }
     }
 
@@ -155,10 +165,12 @@ internal class OidcCredentials(
      * delivery fails. Stores the server's refresh grant, or forgets an older one when the server
      * issues none. A grant that can't be stored is revoked.
      */
-    fun completeSignIn(callback: URI): CompletedSignIn = exchange(callback).first
+    fun completeSignIn(callback: URI): CompletedSignIn = completeSignIn(callback, handOff = false)
 
-    /** [completeSignIn], with the epoch the attempt was consumed under. */
-    private fun exchange(callback: URI): Pair<CompletedSignIn, Int> {
+    private fun completeSignIn(
+        callback: URI,
+        handOff: Boolean,
+    ): CompletedSignIn {
         val attempt =
             try {
                 pending.load()
@@ -168,10 +180,18 @@ internal class OidcCredentials(
             } ?: throw OidcSignInException.InvalidCallback(null)
         val server = Server.of(attempt.serverUrl)
         val items = callbackItems(callback, attempt.state, server.host)
+        // The generation the attempt began under. One restored from before this process started
+        // predates every sign-out in it, so it takes the first generation and any of them cancels it.
+        val generation = synchronized(this) { attemptGenerations[attempt.id] ?: 0 }
         // Only this attempt's own callback ends it, so a stray one can't cancel a live sign-in.
         val epoch =
             synchronized(this) { pending.consume(attempt.id)?.let { attemptEpoch } }
                 ?: throw OidcSignInException.InvalidCallback(server.host)
+        synchronized(this) {
+            attemptGenerations.remove(attempt.id)
+            // Signed out since the attempt began: its code is never exchanged.
+            if (signOutGeneration(server.origin) != generation) throw CancellationException()
+        }
         if (items.any { it.first == "error" }) {
             val description = items.firstOrNull { it.first == "error_description" }?.second
             throw OidcSignInException.SignInRefused(server.host, description)
@@ -201,14 +221,21 @@ internal class OidcCredentials(
                 ?: throw OidcSignInException.SignInRefused(server.host, null)
 
         val refreshToken = body?.opt("refresh_token") as? String
-        if (!refreshToken.isNullOrEmpty()) {
-            val grant = OidcRefreshGrant(refreshToken, body?.opt("user_id") as? String)
-            synchronized(this) {
-                if (epoch != attemptEpoch) {
-                    // Cancelled or replaced while exchanging: the newer attempt owns the grant.
-                    revoke(server, grant)
-                    throw CancellationException()
-                }
+        val grant =
+            refreshToken
+                ?.takeIf(String::isNotEmpty)
+                ?.let { OidcRefreshGrant(it, body?.opt("user_id") as? String) }
+        val completed = CompletedSignIn(attempt.serverUrl, attempt.cookieName, session)
+        // Checking for a sign-out, storing the grant and handing the result over are one step,
+        // so a sign-out lands either before it (and nothing survives) or after it (and clears it).
+        synchronized(this) {
+            // Signed out, cancelled or replaced while the code was being exchanged; a newer
+            // attempt owns the grant.
+            if (signOutGeneration(server.origin) != generation || epoch != attemptEpoch) {
+                grant?.let { revoke(server, it) }
+                throw CancellationException()
+            }
+            if (grant != null) {
                 try {
                     store.save(server.origin, grant)
                 } catch (_: Exception) {
@@ -216,29 +243,23 @@ internal class OidcCredentials(
                     revoke(server, grant)
                     throw OidcSignInException.StorageUnavailable()
                 }
-            }
-        } else {
-            // A server without refresh grants: an older grant for this origin is stale, and a
-            // later refresh must not sign in as whoever it belonged to.
-            synchronized(this) {
-                if (epoch != attemptEpoch) throw CancellationException()
+            } else {
+                // A server without refresh grants: an older grant for this origin is stale, and
+                // a later refresh must not sign in as whoever it belonged to.
                 try {
                     store.delete(server.origin)
                 } catch (_: Exception) {
                     throw OidcSignInException.StorageUnavailable()
                 }
             }
+            if (handOff) handedOff = completed
         }
-        return CompletedSignIn(attempt.serverUrl, attempt.cookieName, session) to epoch
+        return completed
     }
 
     /** [completeSignIn] for the callback receiver; the shell takes the result with [takeHandedOff]. */
     fun completeHandedOffSignIn(callback: URI) {
-        val (completed, epoch) = exchange(callback)
-        synchronized(this) {
-            if (epoch != attemptEpoch) throw CancellationException()
-            handedOff = completed
-        }
+        completeSignIn(callback, handOff = true)
     }
 
     /** The sign-in the callback receiver completed, taken once. */
@@ -282,17 +303,35 @@ internal class OidcCredentials(
         val server = Server.of(serverUrl)
         val grant: OidcRefreshGrant?
         val deleted: Boolean
+        val attemptEnded: Boolean
         synchronized(this) {
+            signOutGenerations[server.origin] = signOutGeneration(server.origin) + 1
             refreshes.remove(server.origin)?.completeExceptionally(CancellationException())
+            // A sign-in still open in the browser, or finished but not yet installed, can't
+            // complete for this origin any more. An unreadable record is left alone, since it
+            // may be another server's; the new generation still ends this origin's attempt.
+            attemptEnded =
+                runCatching {
+                    val attempt = pending.load()
+                    if (attempt != null &&
+                        originOf(attempt.serverUrl) == server.origin
+                    ) {
+                        pending.clear()
+                    }
+                }.isSuccess
+            if (handedOff?.let { originOf(it.serverUrl) } == server.origin) handedOff = null
             // An unreadable grant can't be revoked, but it is still deleted.
             grant = runCatching { store.load(server.origin) }.getOrNull()
             deleted = runCatching { store.delete(server.origin) }.isSuccess
         }
         val revocation =
             grant?.let { revoke(server, it) } ?: CompletableFuture.completedFuture<Void>(null)
-        if (!deleted) throw OidcSignInException.StorageUnavailable()
+        if (!deleted || !attemptEnded) throw OidcSignInException.StorageUnavailable()
         return revocation
     }
+
+    @Synchronized
+    private fun signOutGeneration(origin: String): Int = signOutGenerations[origin] ?: 0
 
     /** Whether a readable refresh grant is stored for the server's origin. */
     fun hasStoredGrant(serverUrl: String): Boolean {
