@@ -2835,9 +2835,11 @@ def native_claude_mock_session_context(
     with _temp_omnigent_mock_config(
         mock_llm_server_url, "claude", workflow_owned=bool(_server_state.get("workflow_owned"))
     ):
-        session_id = _create_native_claude_session(
-            live_server, runner_id, terminal_launch_args=terminal_launch_args
+        # Keep the default create call unchanged; tests/test_ui_fixture_wiring.py pins it.
+        launch_args = (
+            {} if terminal_launch_args is None else {"terminal_launch_args": terminal_launch_args}
         )
+        session_id = _create_native_claude_session(live_server, runner_id, **launch_args)
         try:
             yield (live_server, session_id)
         finally:
