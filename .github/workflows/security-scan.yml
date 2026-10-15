@@ -54,6 +54,10 @@ jobs:
             .github/scripts/security-scan
             .github/scripts/merge-ready
             .github/security
+            .github/scripts/maintainer_approval.py
+            .github/scripts/dependabot_automerge.py
+            .github/dependabot-automerge.json
+          sparse-checkout-cone-mode: false
           persist-credentials: false
 
       - name: Load maintainers
@@ -134,13 +138,29 @@ jobs:
         if: ${{ steps.gate.outputs.scan == 'true' }}
         uses: omnigent-ai/omnigent/.github/actions/setup-uv@25521b2eb074b11ebe51fe5e3eaeb494e20101eb # self-contained setup
 
+      - name: Evaluate Dependabot patch policy
+        id: dependabot
+        if: >-
+          steps.gate.outputs.scan == 'true' &&
+          github.event.pull_request.user.login == 'dependabot[bot]' &&
+          vars.DEPENDABOT_AUTOMERGE_MODE == 'merge'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python3 .github/scripts/dependabot_automerge.py
+          --repository "$REPO" --pr-number "$PR" --expected-head "$HEAD_SHA"
+
       - name: OSV advisory scan (uv.lock)
         # Checks every package version pinned in the PR's uv.lock against the
         # OSV advisory database, which covers known-malicious, typosquatted,
         # and CVE-flagged versions. Only fires when uv.lock is in the changeset
         # to avoid blocking PRs when main's baseline lockfile already has open
         # advisories on main.
-        if: ${{ steps.gate.outputs.scan == 'true' }}
+        # Eligible pilot updates use completed Trivy reports at merge time.
+        if: ${{ steps.gate.outputs.scan == 'true' && steps.dependabot.outputs.eligible != 'true' }}
         working-directory: pr
         run: |
           if ! grep -qxF 'uv.lock' "$GITHUB_WORKSPACE/changed.txt"; then

@@ -47,14 +47,20 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: main
-          sparse-checkout: .github/scripts/maintainer_approval.py
+          sparse-checkout: |
+            .github/scripts/maintainer_approval.py
+            .github/scripts/dependabot_automerge.py
+            .github/dependabot-automerge.json
           sparse-checkout-cone-mode: false
+          persist-credentials: false
 
       - name: Require maintainer approval
         env:
           GH_TOKEN: ${{ github.token }}
           REPO:     ${{ github.repository }}
           PR:       ${{ github.event.pull_request.number }}
+          DEPENDABOT_AUTOMERGE_MODE: ${{ vars.DEPENDABOT_AUTOMERGE_MODE || 'report' }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           python3 .github/scripts/maintainer_approval.py \
             --repository "$REPO" \

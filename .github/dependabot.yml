@@ -4,7 +4,8 @@
 # toggle (enabled out of band); the `*-security` groups below batch a burst of
 # advisories into one PR per ecosystem. Version updates are ON again, but
 # shaped to avoid the churn that had them switched off before:
-#   - minor + patch bumps land as ONE grouped PR per ecosystem per week;
+#   - minor + patch bumps are grouped per ecosystem each week, with a small
+#     Python tooling patch group for the auto-merge pilot;
 #   - majors never arrive for the web workspace (react, react-router, vite
 #     migrations are planned work, not a bot PR) and fall through to their own
 #     PR elsewhere so each gets explicit review;
@@ -42,8 +43,12 @@ updates:
       python-security:
         applies-to: security-updates
         patterns: ["*"]
-      # One group, so the cross-pinned mlflow / mlflow-skinny / mlflow-tracing
-      # train (see uv.toml) moves inside the same PR as everything else.
+      # Keep the small auto-merge pilot separate from runtime and minor bumps.
+      python-tooling-patches:
+        applies-to: version-updates
+        patterns: ["coverage", "pytest", "pytest-cov", "pytest-xdist", "ruff"]
+        update-types: ["patch"]
+      # Keep the cross-pinned mlflow packages in one general update group.
       python-minor-patch:
         applies-to: version-updates
         patterns: ["*"]

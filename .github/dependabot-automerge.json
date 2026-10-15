@@ -1,0 +1,4 @@
+{
+  "python_patch_packages": ["coverage", "pytest", "pytest-cov", "pytest-xdist", "ruff"],
+  "cooldown_days": 7
+}

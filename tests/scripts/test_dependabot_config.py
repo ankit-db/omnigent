@@ -9,6 +9,7 @@ is on ``main``, so these assertions are the pre-merge gate.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -86,12 +87,19 @@ def test_lockfiles_are_declared_at_their_workspace_roots(entries: list[dict[str,
     assert uv_dirs == ["/"]
 
 
-def test_one_minor_patch_group_per_active_ecosystem(entries: list[dict[str, Any]]) -> None:
-    """Version updates land as ONE grouped PR per ecosystem, and majors never join it."""
+def test_minor_patch_groups_keep_the_pilot_separate(entries: list[dict[str, Any]]) -> None:
+    """Each ecosystem has one general group; Python also isolates eligible patches."""
     for entry in entries:
         if not _version_updates_on(entry):
             continue
         groups = _version_groups(entry)
+        if entry["package-ecosystem"] == "uv":
+            assert next(iter(groups)) == "python-tooling-patches"
+            pilot = groups.pop("python-tooling-patches")
+            policy = json.loads((REPO_ROOT / ".github/dependabot-automerge.json").read_text())
+            assert set(pilot["patterns"]) == set(policy["python_patch_packages"])
+            assert pilot["update-types"] == ["patch"]
+            assert entry["cooldown"]["default-days"] == policy["cooldown_days"]
         assert len(groups) == 1, (
             f"{entry['package-ecosystem']}: {len(groups)} version-update groups "
             f"({', '.join(groups)}); each group is its own PR"
