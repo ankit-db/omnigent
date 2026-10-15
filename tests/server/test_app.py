@@ -2406,6 +2406,80 @@ async def _reconnect_with_initialize(
 
 
 @pytest.mark.asyncio
+async def test_on_runner_connect_defers_idle_tree_initialization_until_demand(
+    db_uri: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idle trees attach on reconnect without starting runner runtimes."""
+    from omnigent.entities import Conversation
+    from omnigent.runner.routing import RoutedRunner
+    from omnigent.server.routes import sessions as sessions_routes
+    from omnigent.server.routes._sessions.orchestration import (
+        _ensure_runner_session_initialized,
+    )
+
+    app, captured = _build_minimal_app(db_uri, tmp_path, monkeypatch)
+    runner_id = "runner_idle_reconnect_test"
+    idle_id, archived_id, active_parent_id = _bind_sessions(db_uri, runner_id, count=3)
+    store = SqlAlchemyConversationStore(db_uri)
+    idle = store.get_conversation(idle_id)
+    archived = store.get_conversation(archived_id)
+    active_parent = store.get_conversation(active_parent_id)
+    assert idle is not None and archived is not None and active_parent is not None
+    store.set_session_live_status(idle.id, "idle")
+    store.set_session_live_status(archived.id, "running")
+    store.update_conversation(archived.id, archived=True)
+    store.set_session_live_status(active_parent.id, "idle")
+    active_child = store.create_conversation(
+        agent_id=active_parent.agent_id,
+        runner_id=runner_id,
+        kind="sub_agent",
+        parent_conversation_id=active_parent.id,
+    )
+    store.set_session_live_status(active_child.id, "running")
+
+    connection = _attach_live_connection(app, monkeypatch, runner_id)
+    routed = RoutedRunner(runner_id=runner_id, client=object())  # type: ignore[arg-type]
+    app.state.runner_router.client_for_session_resources = lambda *_a, **_k: routed  # type: ignore[assignment]
+    initialized: list[tuple[str, bool]] = []
+
+    async def _initialize(conv: Conversation, *_a: object, **kwargs: object) -> httpx.Response:
+        initialized.append((conv.id, bool(kwargs.get("suppress_recovery_turn"))))
+        return httpx.Response(
+            201,
+            json={"session_init_protocol_version": 2, "terminal_ready": True},
+            request=httpx.Request("POST", "http://runner/v1/sessions"),
+        )
+
+    async def _noop_async(*_a: object, **_k: object) -> None:
+        return None
+
+    monkeypatch.setattr(app.state.runner_session_initializer, "initialize", _initialize)
+    monkeypatch.setattr(sessions_routes, "_ensure_runner_relay_ready", _noop_async)
+
+    await captured["callback"](runner_id, connection)  # type: ignore[operator]
+
+    assert initialized == [(active_parent.id, False), (active_child.id, False)]
+
+    refreshed_idle = store.get_conversation(idle.id)
+    assert refreshed_idle is not None
+    initialized_on_demand = await _ensure_runner_session_initialized(
+        idle.id,
+        refreshed_idle,
+        routed.client,
+        store,
+        app.state.runner_session_initializer,
+        suppress_recovery_turn=True,
+        require_success=True,
+    )
+
+    assert initialized_on_demand is True
+    assert initialized[-1] == (idle.id, True)
+    assert all(session_id != archived.id for session_id, _ in initialized)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error",
     [ConnectionError("tunnel closed"), httpx.ConnectError("tunnel closed")],

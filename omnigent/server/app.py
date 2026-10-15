@@ -3719,7 +3719,11 @@ def create_app(
             is_parent_owned_subagent,
             restore_active_children,
         )
-        from omnigent.server.routes._sessions.common import _session_sandbox_status_cache
+        from omnigent.server.routes._sessions.common import (
+            _session_sandbox_status_cache,
+            _session_status_cache,
+        )
+        from omnigent.server.routes._sessions.helpers import _last_task_error_from_labels
         from omnigent.server.routes.sessions import (
             _ensure_runner_relay,
             _publish_runner_recovered_status,
@@ -3747,6 +3751,44 @@ def create_app(
                 is_parent_owned_subagent(conv)
                 or (conv.parent_conversation_id in bound_ids and conv.host_id is None)
             )
+
+        def needs_eager_recovery(conv: Conversation) -> bool:
+            if conv.archived:
+                return False
+            # Idle runtimes are recreated on their next interaction. Unknown,
+            # in-flight, failed, and approval-blocked sessions recover now.
+            status = _session_status_cache.get(conv.id, conv.live_status)
+            pending = max(
+                conv.pending_elicitation_count or 0,
+                pending_elicitations.count_for(conv.id),
+            )
+            return (
+                status != "idle"
+                or pending > 0
+                or _last_task_error_from_labels(conv.labels) is not None
+            )
+
+        by_id = {conv.id: conv for conv in convs}
+
+        def independent_root_id(conv: Conversation) -> str | None:
+            seen: set[str] = set()
+            while not is_independent(conv):
+                if conv.id in seen or conv.parent_conversation_id is None:
+                    return None
+                seen.add(conv.id)
+                parent = by_id.get(conv.parent_conversation_id)
+                if parent is None:
+                    return None
+                conv = parent
+            return conv.id
+
+        eager_root_ids: set[str] = set()
+        for conv in convs:
+            if not needs_eager_recovery(conv):
+                continue
+            root_id = independent_root_id(conv)
+            if root_id is not None and not by_id[root_id].archived:
+                eager_root_ids.add(root_id)
 
         # Attach independent roots first; their recovery restores dependent sessions.
         convs.sort(key=lambda conv: not is_independent(conv))
@@ -3835,8 +3877,13 @@ def create_app(
                     runner_session_initializer.require_generation(
                         runner_id, client, connection.generation
                     )
-                    # Sessions without an agent have no runner runtime to initialize.
-                    if conv.agent_id:
+                    initialize_runtime = (
+                        conv.agent_id is not None
+                        and not conv.archived
+                        and (conv.id in eager_root_ids or needs_eager_recovery(conv))
+                    )
+                    # Idle trees reinitialize on demand; active trees recover now.
+                    if initialize_runtime:
                         response = await runner_session_initializer.initialize(
                             conv,
                             client,
@@ -3855,7 +3902,7 @@ def create_app(
                         await _publish_runner_recovered_status(
                             conv.id, conversation_store, require_disconnect_code=True
                         )
-                    if conv.agent_id:
+                    if initialize_runtime:
                         await restore_active_children(
                             conv,
                             client,
