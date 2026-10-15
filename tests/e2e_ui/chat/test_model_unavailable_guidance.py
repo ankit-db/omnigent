@@ -14,25 +14,17 @@ the Claude Code CLI passthrough; this guard confirms that stays intact.
 
 from __future__ import annotations
 
-import io
-import json
 import logging
-import os
-import tarfile
 import time
 import uuid
-from pathlib import Path
 
 import httpx
 import pytest
 import yaml
 from playwright.sync_api import Page, expect
 
-from tests.e2e_ui.chat.test_native_claude_quota_error_in_chat import (
-    _mock_request_count,
-    _terminal_screen_text,
-    _transcript_items,
-)
+from tests._helpers.session import bind_session_runner, bundle_files, post_session_bundle
+from tests.e2e_ui.chat.test_native_claude_quota_error_in_chat import _mock_request_count
 from tests.e2e_ui.conftest import (
     _ensure_runner_online,
     _server_state,
@@ -55,20 +47,18 @@ _UNAVAILABLE_MODEL = "anthropic/claude-opus-4-8"
 _NOT_FOUND_ERROR = f"model: {_UNAVAILABLE_MODEL}"
 _NOT_FOUND_RESPONSES = [{"error": _NOT_FOUND_ERROR, "status_code": 404}] * 60
 
-# Phrases an actionable model-unavailable recovery hint would use; the fix must
-# make the turn-error card carry at least one of them.
+# An actionable model-unavailable recovery hint names at least one of these:
+# the model picker, the ``/model`` command, or checking provider/account access.
+# A generic "try this" prefix the card supplies is deliberately excluded.
 _GUIDANCE_TOKENS = (
     "/model",
     "model picker",
-    "pick a",
-    "choose a",
-    "choose another",
-    "select a",
+    "different model",
+    "another model",
     "supported model",
     "available model",
-    "different model",
-    "provider config",
-    "try this",
+    "provider is configured",
+    "account can access",
 )
 
 _FIRST_REQUEST_TIMEOUT_S = 120.0
@@ -76,40 +66,9 @@ _TURN_END_TIMEOUT_S = 180.0
 _RETRY_QUIET_S = 20.0
 _HOLD_MS = 4_000
 
-_EVIDENCE_DIR = Path(
-    os.environ.get("E2E_SCREENSHOT_DIR", "recordings/model-unavailable-guidance/exec")
-)
-
-
-def _save(name: str, payload: object) -> None:
-    _EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
-    (_EVIDENCE_DIR / name).write_text(json.dumps(payload, indent=2, default=str))
-
-
-def _screenshot(page: Page, name: str) -> None:
-    _EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
-    page.screenshot(path=str(_EVIDENCE_DIR / name))
-
-
-def _stable_mock_url(fallback: str) -> str:
-    """The runner-reachable mock URL.
-
-    Defaults to the ``mock_llm_server_url`` fixture, which the co-located runner
-    reaches in a standard standalone run. ``REPRO_STABLE_MOCK_URL`` overrides it
-    for the prepared repro-env, whose per-exec proxy URL the long-lived runner
-    cannot reach.
-    """
-    return os.environ.get("REPRO_STABLE_MOCK_URL") or fallback
-
 
 def _bundle(name: str, config: dict[str, object]) -> bytes:
-    with io.BytesIO() as buf:
-        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-            data = yaml.safe_dump(config, sort_keys=False).encode()
-            info = tarfile.TarInfo(f"{name}.yaml")
-            info.size = len(data)
-            tar.addfile(info, io.BytesIO(data))
-        return buf.getvalue()
+    return bundle_files({f"{name}.yaml": yaml.safe_dump(config, sort_keys=False).encode()})
 
 
 def _create_claude_sdk_session(base_url: str, runner_id: str, mock_url: str) -> tuple[str, str]:
@@ -126,17 +85,18 @@ def _create_claude_sdk_session(base_url: str, runner_id: str, mock_url: str) -> 
             },
         },
     )
-    create = httpx.post(
-        f"{base_url}/v1/sessions",
-        data={"metadata": json.dumps({})},
-        files={"bundle": (f"{name}.tar.gz", bundle, "application/gzip")},
-        timeout=60.0,
+    create = post_session_bundle(
+        httpx.post, f"{base_url}/v1/sessions", bundle, filename=f"{name}.tar.gz", timeout=60.0
     )
     create.raise_for_status()
     session_id = str(create.json()["session_id"])
-    httpx.patch(
-        f"{base_url}/v1/sessions/{session_id}", json={"runner_id": runner_id}, timeout=30.0
-    ).raise_for_status()
+    # The session exists before the runner bind; drop it if the bind fails so a
+    # shared long-lived server does not accumulate orphaned sessions.
+    try:
+        bind_session_runner(httpx.patch, base_url, session_id, runner_id, timeout=30.0)
+    except Exception:
+        httpx.delete(f"{base_url}/v1/sessions/{session_id}", timeout=10.0)
+        raise
     return name, session_id
 
 
@@ -150,7 +110,7 @@ def _attempt_model_switch(base_url: str, session_id: str) -> dict[str, object]:
     body: object
     try:
         body = resp.json()
-    except Exception:
+    except ValueError:
         body = resp.text[:1000]
     return {"status": resp.status_code, "body": body}
 
@@ -162,9 +122,11 @@ def _wait_for_turn_failure(page: Page, mock_url: str, baseline: int) -> int:
         if time.monotonic() - started > _FIRST_REQUEST_TIMEOUT_S:
             raise AssertionError("the harness never contacted the model provider after Send")
         page.wait_for_timeout(1_000)
+    # Time the quiet/error-pill phase from the first observed request, so a slow
+    # first contact cannot eat into it.
     last_count = _mock_request_count(mock_url)
     quiet_since = time.monotonic()
-    deadline = started + _TURN_END_TIMEOUT_S
+    deadline = time.monotonic() + _TURN_END_TIMEOUT_S
     while time.monotonic() < deadline:
         page.wait_for_timeout(2_000)
         count = _mock_request_count(mock_url)
@@ -175,7 +137,10 @@ def _wait_for_turn_failure(page: Page, mock_url: str, baseline: int) -> int:
         quiet = time.monotonic() - quiet_since >= _RETRY_QUIET_S
         if pill_up or (quiet and page.locator(_WORKING).count() == 0):
             return count
-    return last_count
+    raise AssertionError(
+        "the turn never settled as failed: no error pill appeared and the provider "
+        f"kept being contacted ({last_count - baseline} requests seen)"
+    )
 
 
 _TURN_ERROR_FRAGMENT = "ran into an error during this turn"
@@ -239,7 +204,8 @@ def _drive(
     mock_url: str,
     label: str,
     open_terminal: bool,
-) -> dict[str, object]:
+    require_model_id_on_reload: bool = True,
+) -> None:
     reset_mock_llm(mock_url)
     set_fallback_mock_llm(mock_url, _CLAUDE_MOCK_MODEL, "ok")
 
@@ -248,14 +214,15 @@ def _drive(
         _open_terminal_view(page)
         _wait_terminal_connected(page)
         page.wait_for_timeout(8_000)
-        _screenshot(page, f"{label}-1-terminal-idle.png")
         _select_view_mode(page, "Chat")
 
     composer = page.get_by_role("textbox", name="Message the agent")
     expect(composer).to_be_visible(timeout=60_000)
     switch = _attempt_model_switch(base_url, session_id)
     _log.info("%s model switch to %s -> %s", label, _UNAVAILABLE_MODEL, switch)
-    _screenshot(page, f"{label}-2-after-switch.png")
+    assert 200 <= int(switch["status"]) < 300, (
+        f"{label}: selecting the unavailable model was not accepted: {switch}"
+    )
 
     # From here the provider rejects every request as model-not-found.
     configure_mock_llm(mock_url, _NOT_FOUND_RESPONSES, key=_CLAUDE_MOCK_MODEL)
@@ -267,44 +234,27 @@ def _drive(
     composer.fill(prompt)
     page.get_by_role("button", name="Send", exact=True).click()
     expect(page.locator(_USER, has_text=prompt)).to_have_count(1, timeout=60_000)
-    _screenshot(page, f"{label}-3-sent.png")
 
     requests_seen = _wait_for_turn_failure(page, mock_url, baseline) - baseline
     _log.info("%s: provider saw %d requests after Send", label, requests_seen)
     expect(page.get_by_test_id("error-pill").first).to_be_visible(timeout=60_000)
     page.wait_for_timeout(_HOLD_MS)
-
     live_card = _capture_card(page)
-    _screenshot(page, f"{label}-4-error-card-live.png")
-
-    pane = _terminal_screen_text(base_url, session_id) if open_terminal else ""
-    items = _transcript_items(base_url, session_id)
 
     page.reload()
     expect(page.get_by_test_id("error-pill").first).to_be_visible(timeout=60_000)
     page.wait_for_timeout(2_000)
     reload_card = _capture_card(page)
-    page.wait_for_timeout(_HOLD_MS)
-    _screenshot(page, f"{label}-5-error-card-reloaded.png")
 
     assert live_card["model_id_preserved"], (
-        f"{label} live: unavailable model id dropped from the card"
+        f"{label} live: the unavailable model id dropped from the card"
     )
-
-    record = {
-        "session_id": session_id,
-        "model_switch": switch,
-        "requests_seen": requests_seen,
-        "live_card": live_card,
-        "reload_card": reload_card,
-        "model_id_in_pane": _UNAVAILABLE_MODEL in pane or "404" in pane,
-        "item_types": [i.get("type") for i in items],
-    }
-    _save(f"{label}.json", record)
-
+    if require_model_id_on_reload:
+        assert reload_card["model_id_preserved"], (
+            f"{label} after reload: the original provider message/model id dropped from the card"
+        )
     _assert_turn_error_shows_guidance(f"{label} live", live_card)
     _assert_turn_error_shows_guidance(f"{label} after reload", reload_card)
-    return record
 
 
 @pytest.mark.timeout(500)
@@ -313,12 +263,23 @@ def test_claude_native_model_unavailable_error_shows_recovery_guidance(
     native_claude_mock_session: tuple[str, str],
     mock_llm_server_url: str,
 ) -> None:
-    # Already-covered guard: claude-native surfaces "Run /model" guidance via the
-    # Claude Code CLI passthrough, so this passes today and the fix must keep it.
+    # Regression guard: claude-native surfaces "Run /model" recovery guidance via
+    # the Claude Code CLI passthrough, which must reach the browser card and
+    # survive reload.
     base_url, session_id = native_claude_mock_session
     _log.info("claude-native session %s on %s", session_id, base_url)
     page: Page = request.getfixturevalue("page")
-    _drive(page, base_url, session_id, mock_llm_server_url, "claude-native", open_terminal=True)
+    # claude-native's CLI-passthrough card keeps the recovery guidance after
+    # reload but not the raw model id, so only the guidance is guarded there.
+    _drive(
+        page,
+        base_url,
+        session_id,
+        mock_llm_server_url,
+        "claude-native",
+        open_terminal=True,
+        require_model_id_on_reload=False,
+    )
 
 
 @pytest.mark.timeout(400)
@@ -328,17 +289,30 @@ def test_claude_sdk_model_unavailable_error_shows_recovery_guidance(
     mock_llm_server_url: str,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
-    # Without the shared diagnosis the claude-sdk model-not-found card shows
-    # only the raw provider error with no recovery hint; this guards the hint.
-    assert _ensure_runner_online(live_server, tmp_path_factory) is None
-    runner_id = str(_server_state["runner_id"])
-    runner_mock_url = _stable_mock_url(mock_llm_server_url)
-    name, session_id = _create_claude_sdk_session(live_server, runner_id, runner_mock_url)
-    _log.info("claude-sdk session %s (%s) on %s", session_id, name, live_server)
-    page: Page = request.getfixturevalue("page")
+    # claude-sdk's model-not-found card must carry the recovery hint the shared
+    # diagnosis supplies, alongside the original provider message, after reload.
+    respawned = _ensure_runner_online(live_server, tmp_path_factory)
     try:
-        _drive(
-            page, live_server, session_id, mock_llm_server_url, "claude-sdk", open_terminal=False
-        )
+        runner_id = str(_server_state["runner_id"])
+        name, session_id = _create_claude_sdk_session(live_server, runner_id, mock_llm_server_url)
+        _log.info("claude-sdk session %s (%s) on %s", session_id, name, live_server)
+        page: Page = request.getfixturevalue("page")
+        try:
+            _drive(
+                page,
+                live_server,
+                session_id,
+                mock_llm_server_url,
+                "claude-sdk",
+                open_terminal=False,
+            )
+        finally:
+            httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
     finally:
-        httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+        if respawned is not None:
+            respawned.terminate()
+            try:
+                respawned.wait(timeout=5)
+            except Exception:  # best-effort teardown
+                respawned.kill()
+                respawned.wait(timeout=5)
