@@ -35,8 +35,7 @@ _DONT_ASK_FOOTER = "don't ask on"
 _TARGET_FOOTER = "accept edits on"
 # Claude CLI boot + first footer paint.
 _FOOTER_TIMEOUT_S = 120.0
-# The runner's own budget is ~3 s (tmux advert wait + footer settle), so a
-# switch that takes longer than this has failed rather than slowed.
+# Allow for prompt readiness and multi-step footer cycling on the runner.
 _SWITCH_TIMEOUT_MS = 20_000
 _PANE_COLS, _PANE_ROWS = 120, 40
 
@@ -111,11 +110,15 @@ def _wait_for_footer(base_url: str, session_id: str, footer: str, timeout_s: flo
     deadline = time.monotonic() + timeout_s
     screen = ""
     while time.monotonic() < deadline:
-        terminal_id = _terminal_id(base_url, session_id)
-        if terminal_id is not None:
-            screen = _render_terminal(base_url, session_id, terminal_id)
-            if footer in screen.lower():
-                return screen
+        try:
+            terminal_id = _terminal_id(base_url, session_id)
+            if terminal_id is not None:
+                screen = _render_terminal(base_url, session_id, terminal_id)
+                if footer in screen.lower():
+                    return screen
+        except (httpx.HTTPError, websockets.WebSocketException, OSError):
+            # The terminal is still booting; keep polling until the deadline.
+            pass
         time.sleep(1.0)
     raise AssertionError(f"terminal never rendered {footer!r}; last screen:\n{screen}")
 
@@ -149,7 +152,10 @@ def test_permission_picker_switches_out_of_dont_ask(
         page.get_by_test_id(f"composer-permission-option-{_TARGET_MODE}").click()
     response = switched.value
 
-    error_row = page.get_by_text("Could not switch", exact=False)
+    # The composer echoes the server's rejection, which names this session.
+    error_row = page.get_by_text(
+        f"Could not switch to {_TARGET_MODE} mode for session '{session_id}'", exact=False
+    )
     if response.status != 200:
         # Let the composer render the rejection so a recording ends on it.
         expect(error_row.first).to_be_visible(timeout=10_000)

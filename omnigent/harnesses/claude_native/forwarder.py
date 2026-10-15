@@ -152,6 +152,10 @@ _OBSERVER_HOOK_STDERR_READ_BYTES = 64 * 1024
 # signals change only on a human action (shift+tab, a /btw), so 2s of lag is
 # imperceptible and keeps the subprocess rate low.
 _PANE_POLL_INTERVAL_S = 2.0
+# Statuses with which a server rejects an ``external_permission_mode_change``
+# whose mode it does not know (a server older than this bridge). Unlike a
+# transport failure, the rejection does not clear on its own.
+_UNSUPPORTED_PERMISSION_MODE_STATUSES = frozenset({400, 422})
 # Bound on the per-session ring of already-relayed /btw exchange keys. The
 # overlay persists (and stacks history) across polls, so a handful of keys
 # covers a session's side chats while keeping the dedupe set small.
@@ -877,6 +881,9 @@ class _ForwardDedupeState:
     # survive retries, including a switch back to the last posted mode.
     observed_permission_mode: str | None = None
     permission_mode_change_pending: bool = False
+    # Mode the server rejected as unsupported; skipped until the pane shows
+    # another mode, so a mixed-version deployment is not re-posted every poll.
+    rejected_permission_mode: str | None = None
     # Monotonic deadline before which the next pane capture is skipped, so the
     # single ``capture-pane`` subprocess (feeding both the permission-mode and
     # /btw signals) spawns at _PANE_POLL_INTERVAL_S, not every poll.
@@ -5915,7 +5922,8 @@ async def _relay_permission_mode(
     started in manual mode carries no ``--permission-mode`` arg and no mode
     label, so with nothing posted the web picker has no mode to render and
     hides itself. Best-effort and idempotent — an unchanged or unreadable
-    (``None``) mode is a no-op, and a failed POST is retried next poll.
+    (``None``) mode is a no-op, and a failed POST is retried next poll. A mode
+    the server rejects as unsupported is not retried until the footer changes.
 
     Only a change between readable observations establishes a selection.
     A switch before the first readable footer is indistinguishable from a
@@ -5930,7 +5938,10 @@ async def _relay_permission_mode(
         return
     if dedupe.observed_permission_mode is not None and mode != dedupe.observed_permission_mode:
         dedupe.permission_mode_change_pending = True
+        dedupe.rejected_permission_mode = None
     dedupe.observed_permission_mode = mode
+    if mode == dedupe.rejected_permission_mode:
+        return
     if mode == dedupe.posted_permission_mode and not dedupe.permission_mode_change_pending:
         return
     try:
@@ -5940,6 +5951,26 @@ async def _relay_permission_mode(
             mode=mode,
             initial_observation=not dedupe.permission_mode_change_pending,
         )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in _UNSUPPORTED_PERMISSION_MODE_STATUSES:
+            dedupe.rejected_permission_mode = mode
+            _logger.warning(
+                "external_permission_mode_change rejected by the server (HTTP %s); "
+                "session=%s mode=%s — not re-posting until the footer changes",
+                exc.response.status_code,
+                session_id,
+                mode,
+                extra={"session_id": session_id},
+            )
+            return
+        _logger.debug(
+            "external_permission_mode_change post failed; session=%s mode=%s",
+            session_id,
+            mode,
+            exc_info=True,
+            extra={"session_id": session_id},
+        )
+        return
     except httpx.HTTPError:
         _logger.debug(
             "external_permission_mode_change post failed; session=%s mode=%s",
