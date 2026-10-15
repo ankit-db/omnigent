@@ -257,7 +257,7 @@ describe("Harnesses grid", () => {
     hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": "binary-missing" } }];
     renderHarnesses();
 
-    expect(screen.getByText("Binary missing")).toBeTruthy();
+    expect(screen.getByText("Not installed")).toBeTruthy();
     expect(screen.queryByTestId("harness-action-codex-native")).toBeNull();
   });
 

@@ -112,6 +112,10 @@ describe("harnessUnavailableReasonOnHost", () => {
       ),
     ).toBe("binary-missing");
     expect(harnessUnavailableReasonOnHost("pi", hostWith({ pi: false }))).toBe("unconfigured");
+    // Older hosts sent a bare `false` for a missing Codex CLI.
+    expect(harnessUnavailableReasonOnHost("codex", hostWith({ codex: false }))).toBe(
+      "binary-missing",
+    );
     expect(harnessUnavailableReasonOnHost("codex", hostWith({ codex: "version-too-low" }))).toBe(
       "version-too-low",
     );

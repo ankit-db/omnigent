@@ -200,6 +200,7 @@ export function harnessUnavailableReasonOnHost(
   if (!harness || !host?.configured_harnesses) return null;
   const availability = host.configured_harnesses[harness];
   if (availability === false) {
+    // Older hosts report a bare `false` (cause unknown); only Codex's meant "not installed".
     if (isCodexHarness(harness)) return "binary-missing";
     return "unconfigured";
   }
@@ -259,7 +260,7 @@ export function harnessUnconfiguredOnHost(
  */
 export function harnessWarningBadgeText(reason: string | null, collapsed = false): string {
   if (collapsed) return "needs setup";
-  if (reason === "binary-missing") return "binary missing";
+  if (reason === "binary-missing") return "not installed";
   if (reason === "needs-auth") return "needs auth";
   if (reason === "version-too-low") return "outdated";
   return "needs setup";

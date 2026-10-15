@@ -6230,7 +6230,7 @@ describe("NewChatLandingScreen", () => {
       displayName: "Cursor",
       harness: "cursor-native",
       readiness: "binary-missing",
-      badgeName: "binary missing",
+      badgeName: "not installed",
       warning: "Cursor isn't configured on machine-1 — run omni setup",
     },
     {
