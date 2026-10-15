@@ -142,9 +142,13 @@ def test_permission_picker_switches_out_of_dont_ask(
         f"Could not switch to {_TARGET_MODE} mode for session '{session_id}'", exact=False
     )
     if response.status != 200:
-        # Let the composer render the rejection so a recording ends on it.
-        expect(error_row.first).to_be_visible(timeout=10_000)
-    assert response.status == 200, f"mode switch rejected: {response.text()}"
+        rejection = response.text()
+        # Let the composer render the rejection so a recording ends on it, but
+        # report the server's reason even if the row never appears.
+        try:
+            expect(error_row.first).to_be_visible(timeout=10_000)
+        finally:
+            pytest.fail(f"mode switch rejected: {rejection}")
     expect(chip).to_have_text(_TARGET_LABEL)
     expect(error_row).to_have_count(0)
     _wait_for_footer(base_url, session_id, _TARGET_FOOTER, timeout_s=10.0)
