@@ -5969,9 +5969,10 @@ async def _relay_permission_mode(
                 time.monotonic() + _REJECTED_PERMISSION_MODE_RETRY_S
             )
             _logger.warning(
-                "external_permission_mode_change rejected by the server (HTTP %s); "
+                "external_permission_mode_change rejected by the server (HTTP %s: %s); "
                 "session=%s mode=%s — retrying in %.0fs or when the footer changes",
                 exc.response.status_code,
+                exc.response.text[:200],
                 session_id,
                 mode,
                 _REJECTED_PERMISSION_MODE_RETRY_S,

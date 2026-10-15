@@ -31,7 +31,9 @@ _TARGET_FOOTER = "accept edits on"
 _FOOTER_TIMEOUT_S = 120.0
 # Allow for prompt readiness and multi-step footer cycling on the runner.
 _SWITCH_TIMEOUT_MS = 20_000
-_PANE_COLS, _PANE_ROWS = 120, 40
+# Wider than any real pane: a read-only attach ignores the resize, and a
+# narrower screen would wrap the footer line.
+_PANE_COLS, _PANE_ROWS = 250, 60
 
 
 @pytest.fixture

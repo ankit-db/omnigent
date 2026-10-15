@@ -606,6 +606,8 @@ async def test_relay_permission_mode_retries_after_transient_failure() -> None:
 @contextlib.asynccontextmanager
 async def _relay_against_rejecting_server(
     reject: set[str],
+    *,
+    status: int = 400,
 ) -> AsyncIterator[
     tuple[
         list[dict[str, Any]],
@@ -613,16 +615,16 @@ async def _relay_against_rejecting_server(
         Callable[[str | None], Awaitable[None]],
     ]
 ]:
-    """Relay pane modes to a server that rejects the modes in ``reject`` as invalid input."""
+    """Relay pane modes to a server that rejects the modes in ``reject`` with *status*."""
     dedupe = forwarder._ForwardDedupeState()
     posts: list[dict[str, Any]] = []
 
     def _handle_request(request: httpx.Request) -> httpx.Response:
-        """Reject the modes in ``reject`` with 400; accept the rest."""
+        """Reject the modes in ``reject`` with *status*; accept the rest."""
         payload = json.loads(request.content.decode("utf-8"))
         posts.append(payload)
         if payload["data"]["permission_mode"] in reject:
-            return httpx.Response(400, json={"error": {"code": "invalid_input"}})
+            return httpx.Response(status, json={"error": {"code": "invalid_input"}})
         return httpx.Response(202, json={})
 
     transport = httpx.MockTransport(_handle_request)
@@ -641,7 +643,10 @@ async def _relay_against_rejecting_server(
 
 
 @pytest.mark.asyncio
-async def test_relay_permission_mode_stops_reposting_a_mode_the_server_rejects() -> None:
+@pytest.mark.parametrize("status", [400, 422])
+async def test_relay_permission_mode_stops_reposting_a_mode_the_server_rejects(
+    status: int,
+) -> None:
     """
     An older server's 400 for a newer footer value is not retried every poll.
 
@@ -651,7 +656,11 @@ async def test_relay_permission_mode_stops_reposting_a_mode_the_server_rejects()
     of the session, so the relay pauses before trying again. A changed footer
     is still reported right away as the switch it is.
     """
-    async with _relay_against_rejecting_server({"dontAsk"}) as (posts, dedupe, relay):
+    async with _relay_against_rejecting_server({"dontAsk"}, status=status) as (
+        posts,
+        dedupe,
+        relay,
+    ):
         await relay("dontAsk")
         assert len(posts) == 1
         assert dedupe.posted_permission_mode is None
