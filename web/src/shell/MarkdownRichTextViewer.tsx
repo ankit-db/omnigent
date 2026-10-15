@@ -23,7 +23,7 @@ import type { Transaction } from "@tiptap/pm/state";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Table, TableRow, TableCell, TableHeader } from "@tiptap/extension-table";
 import { ListItem, TaskItem, TaskList } from "@tiptap/extension-list";
-import { Markdown } from "@tiptap/markdown";
+import { SourceMappedMarkdown } from "./SourceMappedMarkdown";
 import type { Comment } from "@/hooks/useComments";
 import type { ActiveSelection } from "./codeViewerHelpers";
 import { useCanEdit } from "@/hooks/usePermissions";
@@ -369,7 +369,7 @@ function MarkdownRichTextViewerInner({
       ImageAwareLink.configure({ openOnClick: false, autolink: false }),
       GitHubAlertBlockquote,
       HtmlPassthrough,
-      Markdown,
+      SourceMappedMarkdown,
       createWorkspaceImageExtension(conversationId, path),
       createCommentDecorationExtension(commentStateRef),
       createSearchDecorationExtension(searchStateRef),
