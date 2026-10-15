@@ -1217,9 +1217,7 @@ class ExecutorAdapter(HarnessApp):
                 remediation=diagnosis.remediation,
             )
 
-        # A model-not-found reaches here with the provider's text but no next
-        # step; the SDK gets no "/model" hint the CLI would append. Add the
-        # recovery hint while keeping the generic headline and original message.
+        # Preserve the failure metadata; add only the recovery guidance.
         model_diagnosis = diagnose_model_unavailable(message)
         if model_diagnosis is not None:
             detail = super()._build_error_detail(exception)

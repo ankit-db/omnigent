@@ -334,9 +334,8 @@ def diagnose_model_unavailable(message: str) -> FailureDiagnosis | None:
     """Explain a provider rejecting the selected model, with a recovery hint.
 
     The in-process SDK path gets no next step from the harness, unlike the
-    Claude Code CLI, which appends its own ``/model`` hint. Returns ``None`` for
-    anything that is not a model-not-found rejection, so auth, rate-limit,
-    budget, and plain-404 handling is unchanged.
+    Claude Code CLI, which appends its own ``/model`` hint. Returns ``None``
+    when the marker is absent.
     """
     if _MODEL_UNAVAILABLE_MARKER not in message.lower():
         return None

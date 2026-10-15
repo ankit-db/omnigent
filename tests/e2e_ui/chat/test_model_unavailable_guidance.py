@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from typing import TypedDict
 
 import httpx
 import pytest
@@ -146,11 +147,25 @@ def _wait_for_turn_failure(page: Page, mock_url: str, baseline: int) -> int:
 _TURN_ERROR_FRAGMENT = "ran into an error during this turn"
 
 
-def _capture_card(page: Page) -> dict[str, object]:
+class _Card(TypedDict):
+    headline: str
+    body: str
+    full: str
+    recovery_tokens: list[str]
+    model_id: bool
+
+
+class _CardSummary(TypedDict):
+    pill_count: int
+    cards: list[_Card]
+    headlines: list[str]
+
+
+def _capture_card(page: Page) -> _CardSummary:
     """Read every failure pill the Chat view shows for the failed turn(s)."""
     pills = page.get_by_test_id("error-pill")
     count = pills.count()
-    cards: list[dict[str, object]] = []
+    cards: list[_Card] = []
     for i in range(count):
         pill = pills.nth(i)
         toggle = pill.locator('button[aria-expanded="false"]')
@@ -169,24 +184,27 @@ def _capture_card(page: Page) -> dict[str, object]:
                 "model_id": _UNAVAILABLE_MODEL in text,
             }
         )
-    full_hay = "\n".join(c["full"] for c in cards)
     return {
         "pill_count": count,
         "cards": cards,
-        "model_id_preserved": _UNAVAILABLE_MODEL in full_hay,
         "headlines": [c["headline"] for c in cards],
     }
 
 
-def _turn_error_pill(card: dict[str, object]) -> dict[str, object] | None:
-    for c in card["cards"]:  # type: ignore[index]
-        if _TURN_ERROR_FRAGMENT in str(c["headline"]).lower():
+def _turn_error_pill(card: _CardSummary) -> _Card | None:
+    for c in card["cards"]:
+        if _TURN_ERROR_FRAGMENT in c["headline"].lower():
             return c
     return None
 
 
-def _assert_turn_error_shows_guidance(where: str, card: dict[str, object]) -> None:
-    assert card.get("pill_count"), f"{where}: no error pill rendered for the failed turn"
+def _assert_turn_error_card(where: str, card: _CardSummary, *, require_model_id: bool) -> None:
+    """Check the failed turn's own card for the recovery hint and preserved model id.
+
+    Reading the selected turn-error card, not any pill on the page, proves the
+    hint and the preserved model id land on the same card.
+    """
+    assert card["pill_count"], f"{where}: no error pill rendered for the failed turn"
     turn = _turn_error_pill(card)
     assert turn is not None, (
         f"{where}: no model-not-found turn-error pill; headlines={card['headlines']!r}"
@@ -195,6 +213,11 @@ def _assert_turn_error_shows_guidance(where: str, card: dict[str, object]) -> No
         f"{where}: model-not-found turn-error card shows no actionable recovery hint "
         f"(expected model-picker / '/model' / provider-config guidance); body={turn['body']!r}"
     )
+    if require_model_id:
+        assert turn["model_id"], (
+            f"{where}: the unavailable model id dropped from the turn-error card; "
+            f"full={turn['full']!r}"
+        )
 
 
 def _drive(
@@ -204,6 +227,7 @@ def _drive(
     mock_url: str,
     label: str,
     open_terminal: bool,
+    require_model_id_live: bool = True,
     require_model_id_on_reload: bool = True,
 ) -> None:
     reset_mock_llm(mock_url)
@@ -246,15 +270,10 @@ def _drive(
     page.wait_for_timeout(2_000)
     reload_card = _capture_card(page)
 
-    assert live_card["model_id_preserved"], (
-        f"{label} live: the unavailable model id dropped from the card"
+    _assert_turn_error_card(f"{label} live", live_card, require_model_id=require_model_id_live)
+    _assert_turn_error_card(
+        f"{label} after reload", reload_card, require_model_id=require_model_id_on_reload
     )
-    if require_model_id_on_reload:
-        assert reload_card["model_id_preserved"], (
-            f"{label} after reload: the original provider message/model id dropped from the card"
-        )
-    _assert_turn_error_shows_guidance(f"{label} live", live_card)
-    _assert_turn_error_shows_guidance(f"{label} after reload", reload_card)
 
 
 @pytest.mark.timeout(500)
@@ -269,8 +288,9 @@ def test_claude_native_model_unavailable_error_shows_recovery_guidance(
     base_url, session_id = native_claude_mock_session
     _log.info("claude-native session %s on %s", session_id, base_url)
     page: Page = request.getfixturevalue("page")
-    # claude-native's CLI-passthrough card keeps the recovery guidance after
-    # reload but not the raw model id, so only the guidance is guarded there.
+    # Switching a native terminal to the override fails at the terminal, so the
+    # turn-error card names the in-use model rather than the requested id. Guard
+    # the "/model" recovery guidance it carries, both live and after reload.
     _drive(
         page,
         base_url,
@@ -278,6 +298,7 @@ def test_claude_native_model_unavailable_error_shows_recovery_guidance(
         mock_llm_server_url,
         "claude-native",
         open_terminal=True,
+        require_model_id_live=False,
         require_model_id_on_reload=False,
     )
 
