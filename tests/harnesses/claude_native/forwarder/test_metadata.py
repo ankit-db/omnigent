@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -684,9 +685,17 @@ async def test_relay_permission_mode_retries_a_rejected_mode_after_the_pause() -
             )
 
         await _relay("dontAsk")
+        assert len(posts) == 1
+        # The pause is the documented interval, measured from the rejection.
+        assert dedupe.rejected_permission_mode_retry_at - time.monotonic() == pytest.approx(
+            forwarder._REJECTED_PERMISSION_MODE_RETRY_S, abs=5.0
+        )
+
+        # Suppressed while the deadline is still ahead, however close.
+        await _relay("dontAsk")
+        dedupe.rejected_permission_mode_retry_at = time.monotonic() + 60.0
         await _relay("dontAsk")
         assert len(posts) == 1
-        assert dedupe.rejected_permission_mode_retry_at > 0.0
 
         # Still rejected after the pause: one more attempt, then a new pause.
         dedupe.rejected_permission_mode_retry_at = 0.0
