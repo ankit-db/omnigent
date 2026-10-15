@@ -115,9 +115,9 @@ def _stop_respawned_runner(respawned: subprocess.Popen[bytes] | None) -> None:
     respawned.terminate()
     try:
         respawned.wait(timeout=5)
-    except Exception:  # best-effort teardown
+    except subprocess.TimeoutExpired:  # best-effort teardown
         respawned.kill()
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(subprocess.TimeoutExpired):
             respawned.wait(timeout=5)
 
 
@@ -171,6 +171,15 @@ def _persisted_errors(base_url: str, session_id: str) -> list[dict[str, object]]
         for item in items
         if isinstance(item, dict) and item.get("type") == "error"
     ]
+
+
+def _launch_failure(base_url: str, session_id: str) -> str | None:
+    """The runner's terminal-start failure for the session, when Pi never launched."""
+    snapshot = httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=10.0).json()
+    error = snapshot.get("last_task_error") or {}
+    if error.get("code") == "native_terminal_start_failed":
+        return str(error.get("message"))
+    return None
 
 
 def _screenshot(page: Page, name: str) -> None:
@@ -272,7 +281,15 @@ def test_pi_native_model_unavailable_shows_guidance_live_and_after_reload(
 def _drive_pi_journey(request: pytest.FixtureRequest, live_server: str, session_id: str) -> None:
     page: Page = request.getfixturevalue("page")
     page.goto(f"{live_server}/c/{session_id}")
-    _open_terminal_until_connected(page)
+    try:
+        _open_terminal_until_connected(page)
+    except AssertionError:
+        # A host whose runner cannot start Pi at all is a precondition failure,
+        # not the model-unavailable behavior under test.
+        launch_error = _launch_failure(live_server, session_id)
+        if launch_error is not None:
+            pytest.skip(f"this host could not launch Pi: {launch_error}")
+        raise
     _screenshot(page, "pi-native-launch")
     composer = page.get_by_role("textbox", name="Message the agent")
     if composer.is_enabled():
@@ -307,6 +324,7 @@ def _drive_pi_journey(request: pytest.FixtureRequest, live_server: str, session_
         # The id and the hint must sit on the same card, not on separate pills.
         card = next((text for text in texts if _UNAVAILABLE_MODEL in text), None)
         assert card is not None, f"{stage}: no card names the unavailable model"
+        assert _PROVIDER_MESSAGE.search(card), f"{stage}: provider message missing from the card"
         assert _HINT.search(card), (
             f"{stage}: no next step (model picker or /model) on the Pi model-unavailable card"
         )
