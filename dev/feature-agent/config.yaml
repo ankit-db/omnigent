@@ -1,0 +1,71 @@
+# feature-agent (local) — build one feature from a Linear feature ticket, or
+# remediate requested changes on an existing feature-agent PR.
+#
+# Writes the requirements and CUJs, chooses a design (recording the rejected
+# alternatives), implements it with tests, records a captioned demo for every
+# covered CUJ, opens a ready-for-review PR on omnigent-ai/omnigent, and iterates
+# on CI and Polly/OCR until green and settled. It never merges.
+#
+# Usage (run from the root of your omnigent-ai/omnigent checkout):
+#
+#   python dev/feature.py https://linear.app/omnigent/issue/OMNI-1234/slug
+#
+# or directly:
+#
+#   omnigent run dev/feature-agent \
+#     -p '{"feature_url":"https://linear.app/omnigent/issue/OMNI-1234"}'
+#
+# The brain runs on the Claude Agent SDK, so configure a Claude provider first
+# (`omnigent setup`).
+
+spec_version: 1
+name: feature_agent
+description: >-
+  Builds one feature from a Linear feature ticket on omnigent-ai/omnigent. It
+  writes down the requirements and target CUJs, chooses a design and records the
+  alternatives it rejected, implements it with tests at the lowest reliable
+  layer, and records at least one captioned demo per covered CUJ. It then opens
+  a ready-for-review PR whose description states the design, the alternatives,
+  and which CUJs are and are not covered, and drives that PR through CI and the
+  Polly/OCR review loop until every finding is settled. A ticket too big for one
+  feature, or a design choice that needs a human, stops before implementation
+  with a proposal for the ticket. It can also remediate trusted human change
+  requests on its own PRs. It does not merge.
+
+executor:
+  type: omnigent
+  context_window: 1000000
+  reasoning_effort: xhigh
+  config:
+    harness: claude-sdk
+    permission_mode: bypassPermissions
+
+# AGENTS.md routes phases to bundled skills; detailed procedures load on demand.
+instructions: AGENTS.md
+
+# Shares only when invoked with `public: true` (`dev/feature.py --public`).
+agent_session_sharing: public
+
+async: true
+cancellable: true
+
+# Polly and OCR review published PRs; no child-session tools.
+spawn: false
+
+os_env:
+  type: caller_process
+  cwd: .
+  sandbox:
+    type: none
+
+# Same guardrails as resolve-agent: outward git/GitHub commands run unattended
+# (`dev/feature.py` confirms before launch) and the catastrophic set stays denied.
+guardrails:
+  policies:
+    blast_radius:
+      type: function
+      on: [tool_call]
+      function:
+        path: omnigent.inner.nessie.policies.blast_radius
+        arguments:
+          gate_pushes: false

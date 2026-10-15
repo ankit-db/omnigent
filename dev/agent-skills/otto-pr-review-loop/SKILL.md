@@ -9,8 +9,9 @@ Shared by Otto agents that drive a PR (Resolve calls this Step 4.3). Keep
 agent-specific branch, publication and handoff rules in the calling agent.
 
 **Handoff contract.** An agent adopting this loop must emit a handoff that
-`review_cycle.py check --handoff` can validate: `outcome: "fixed"`, an explicit
-`remaining_work: []`, and `review_cycle` with the snapshot's `head_sha` and
+`review_cycle.py check --handoff` can validate: its success outcome (Resolve:
+`"fixed"`; feature agent: `"implemented"`), an explicit `remaining_work: []`,
+and `review_cycle` with the snapshot's `head_sha` and
 `fingerprint` plus one `dispositions` record per feedback `key`, each with a
 `status` of `addressed`, `invalid` or `not_needed` and a non-empty `reason`.
 

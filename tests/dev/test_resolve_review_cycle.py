@@ -277,6 +277,23 @@ def test_invalid_handoffs_cannot_claim_ready(mutation):
         cycle.validate(state, result)
 
 
+@pytest.mark.parametrize("outcome", ["fixed", "implemented"])
+def test_each_agent_success_outcome_can_claim_ready(outcome):
+    state = cycle.snapshot("o/r", 7, Github())
+    result = handoff(state)
+    result["outcome"] = outcome
+    cycle.validate(state, result)
+
+
+@pytest.mark.parametrize("outcome", ["partially_fixed", "partially_implemented"])
+def test_partial_outcomes_cannot_claim_ready(outcome):
+    state = cycle.snapshot("o/r", 7, Github())
+    result = handoff(state)
+    result["outcome"] = outcome
+    with pytest.raises(RuntimeError, match=f"not '{outcome}'"):
+        cycle.validate(state, result)
+
+
 def test_do_not_dispatch_completed_reviews():
     api = Github()
     cycle.request_reviews("o/r", 7, cycle.snapshot("o/r", 7, api), api)
