@@ -157,7 +157,7 @@ export function LandingStep({
             <DropdownMenuContent align="end" style={{ width: menuWidth }}>
               <DropdownMenuRadioGroup value={selectedUrl} onValueChange={setSelection}>
                 {servers.map((url) => {
-                  const name = nameOf(url) ?? ownServerName(serverNames, url);
+                  const name = nameOf(url) ?? ownServerName(serverNames, url) ?? teamName(url);
                   return (
                     <Fragment key={url}>
                       {url === firstRecent && (

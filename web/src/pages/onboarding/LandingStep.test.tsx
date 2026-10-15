@@ -59,7 +59,10 @@ describe("LandingStep", () => {
       }),
     ).toBeInTheDocument();
     expect(screen.getByText("(dbc-1.cloud.example.com)")).toHaveClass("text-muted-foreground");
-    expect(screen.getByText("https://two.example.com/")).not.toHaveClass("text-muted-foreground");
+    expect(
+      screen.getByRole("menuitemradio", { name: "Two (two.example.com)" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("(two.example.com)")).toHaveClass("text-muted-foreground");
     expect(screen.getAllByRole("menuitemradio")).toHaveLength(2);
     expect(screen.queryByText("Recent servers")).not.toBeInTheDocument();
   });
@@ -83,13 +86,13 @@ describe("LandingStep", () => {
     expect(screen.getAllByRole("menuitemradio").map((i) => i.textContent)).toEqual([
       "Not shown (team.example.com)",
       "Acme Engineering (omni.example)",
-      "https://plain.example/",
+      "Plain (plain.example)",
     ]);
     const heading = screen.getByText("Recent servers");
     expect(heading).toHaveClass("text-muted-foreground");
     expect(heading.nextElementSibling).toHaveAccessibleName("Acme Engineering (omni.example)");
     expect(screen.getByText("(omni.example)")).toHaveClass("text-muted-foreground");
-    expect(screen.getByText("https://plain.example/")).not.toHaveClass("text-muted-foreground");
+    expect(screen.getByText("(plain.example)")).toHaveClass("text-muted-foreground");
   });
 
   it("lists every server and selects without connecting until the main button is clicked", () => {
@@ -100,11 +103,11 @@ describe("LandingStep", () => {
     });
     openDropdown();
     expect(screen.getAllByRole("menuitemradio").map((i) => i.textContent)).toEqual([
-      "https://team.example.com",
+      "Team (team.example.com)",
       "Engineering (other.example.com)",
-      "https://old.example.com/",
+      "Old (old.example.com)",
     ]);
-    expect(screen.getByRole("menuitemradio", { name: "https://team.example.com" })).toBeChecked();
+    expect(screen.getByRole("menuitemradio", { name: "Team (team.example.com)" })).toBeChecked();
     fireEvent.click(screen.getByRole("menuitemradio", { name: "Engineering (other.example.com)" }));
     expect(props.onJoinManaged).not.toHaveBeenCalled();
     expect(props.onJoinUrl).not.toHaveBeenCalled();
@@ -121,23 +124,23 @@ describe("LandingStep", () => {
       expect(item.querySelector("svg.lucide-users")).toBeInTheDocument();
     }
     expect(
-      screen.getByRole("menuitemradio", { name: "https://team.example.com" }),
+      screen.getByRole("menuitemradio", { name: "Team (team.example.com)" }),
     ).not.toBeChecked();
     expect(
-      screen.getByRole("menuitemradio", { name: "https://team.example.com" }),
+      screen.getByRole("menuitemradio", { name: "Team (team.example.com)" }),
     ).not.toHaveAttribute("data-active");
     fireEvent.click(selected);
     fireEvent.click(join);
     expect(props.onJoinManaged).toHaveBeenCalledExactlyOnceWith("https://other.example.com/");
 
     openDropdown();
-    fireEvent.click(screen.getByRole("menuitemradio", { name: "https://old.example.com/" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Old (old.example.com)" }));
     expect(props.onJoinUrl).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Join your team (old.example.com)" }));
     expect(props.onJoinUrl).toHaveBeenCalledExactlyOnceWith("https://old.example.com/");
 
     openDropdown();
-    fireEvent.click(screen.getByRole("menuitemradio", { name: "https://team.example.com" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Team (team.example.com)" }));
     fireEvent.click(screen.getByRole("button", { name: "Join your team (Team)" }));
     expect(props.onJoinManaged).toHaveBeenLastCalledWith("https://team.example.com");
   });
@@ -156,7 +159,7 @@ describe("LandingStep", () => {
     fireEvent.click(screen.getByRole("button", { name: "Select server" }));
     expect(props.onJoinUrl).not.toHaveBeenCalled();
     openDropdown();
-    const selected = screen.getByRole("menuitemradio", { name: "https://typed.example.com/" });
+    const selected = screen.getByRole("menuitemradio", { name: "Typed (typed.example.com)" });
     expect(selected).toBeChecked();
     fireEvent.click(selected);
     fireEvent.click(screen.getByRole("button", { name: "Join your team (typed.example.com)" }));
