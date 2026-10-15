@@ -3871,7 +3871,7 @@ def test_curated_tier_alias_resolves_before_bracket_strip() -> None:
     assert [entry["id"] for entry in provider.extra_models] == ["GLM-5.3", "GLM-5.3-Flash"]
 
 
-@pytest.mark.parametrize("outcome", ["timeout", "cancelled", "ok"])
+@pytest.mark.parametrize("outcome", ["timeout", "cancelled", "shell_parent", "output_limit", "ok"])
 def test_native_token_helper_reaps_its_process_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str
 ) -> None:
@@ -3887,10 +3887,15 @@ def test_native_token_helper_reaps_its_process_group(
 
     if os.name == "nt" or shutil.which("node") is None:
         pytest.skip("POSIX process-group cleanup requires Node")
-    if outcome == "timeout":
+    if outcome in ("timeout", "shell_parent"):
         monkeypatch.setattr(auth_command, "AUTH_TIMEOUT_MS", 2_000)
     pid_file = tmp_path / "descendant.pid"
     helper = "import os,sys,time; open(sys.argv[1],'w').write(str(os.getpid())); time.sleep(30)"
+    if outcome == "output_limit":
+        helper = helper.replace(
+            "time.sleep(30)",
+            "sys.stdout.write('x' * (1024 * 1024 + 1)); sys.stdout.flush(); time.sleep(30)",
+        )
     command = shlex.join([sys.executable, "-c", helper, str(pid_file)])
     if outcome == "ok":
         command += (
@@ -3903,24 +3908,36 @@ def test_native_token_helper_reaps_its_process_group(
     status = next((tmp_path / auth_command.AUTH_DIR_NAME).glob("auth-*.json"))
     status = status.with_name(status.name + ".result.json")
     status.write_text(json.dumps({"kind": "stale"}))
-    process = subprocess.Popen(shlex.split(wrapped[1:]), stdout=subprocess.PIPE)
+    if outcome == "shell_parent":
+        process = subprocess.Popen(wrapped[1:] + "; true", shell=True, stdout=subprocess.PIPE)
+    else:
+        process = subprocess.Popen(shlex.split(wrapped[1:]), stdout=subprocess.PIPE)
+    started = time.monotonic()
     try:
         deadline = time.monotonic() + 4
         while not pid_file.exists() and time.monotonic() < deadline:
             time.sleep(0.02)
         assert pid_file.exists()
-        if outcome == "cancelled":
+        if outcome in ("cancelled", "shell_parent"):
             assert not status.exists(), "a running helper must clear the previous result"
             process.terminate()
         stdout, _ = process.communicate(timeout=12)
-        assert process.returncode == (0 if outcome == "ok" else 1)
+        if outcome == "shell_parent":
+            assert process.returncode != 0
+            assert time.monotonic() - started < 6
+        else:
+            assert process.returncode == (0 if outcome == "ok" else 1)
         assert stdout == (b"private-token" if outcome == "ok" else b"")
         pid = int(pid_file.read_text())
         deadline = time.monotonic() + 2
         while process_alive(pid) and time.monotonic() < deadline:
             time.sleep(0.02)
         assert not process_alive(pid)
-        assert json.loads(status.read_text())["kind"] == outcome
+        kind = json.loads(status.read_text())["kind"]
+        if outcome == "shell_parent":
+            assert kind in ("timeout", "cancelled")
+        else:
+            assert kind == outcome
     finally:
         if process.poll() is None:
             process.terminate()
