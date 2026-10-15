@@ -92,6 +92,7 @@ function nativeAuthFailure(message, ctx) {
     (message && message.provider) || (ctx && ctx.model && ctx.model.provider);
   if (!authDir || typeof provider !== "string" || typeof error !== "string")
     return null;
+  // Match wrap_auth_command's provider key and Pi's resolver error wording.
   const id = crypto
     .createHash("sha256")
     .update(provider)
@@ -104,9 +105,8 @@ function nativeAuthFailure(message, ctx) {
   )
     return null;
   try {
-    const result = JSON.parse(
-      fs.readFileSync(path.join(authDir, `${file}.result.json`), "utf8"),
-    );
+    const resultPath = path.join(authDir, `${file}.result.json`);
+    const result = JSON.parse(fs.readFileSync(resultPath, "utf8"));
     const age = Date.now() - result.at;
     if (
       result.piPid !== process.pid ||
@@ -127,6 +127,7 @@ function nativeAuthFailure(message, ctx) {
     };
     const reason = reasons[result.kind];
     if (!reason) return null;
+    fs.unlinkSync(resultPath);
     return {
       code: `pi_auth_${result.kind}`,
       message: `Pi authentication helper ${reason}. Check the configured token command, then send another message to retry. Your session is preserved.`,

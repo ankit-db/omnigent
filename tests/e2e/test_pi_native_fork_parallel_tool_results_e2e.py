@@ -84,6 +84,7 @@ def pi_fork_rig(
         anthropic_sse_text_response("FORK-RESUME-OK", model=_MODEL),
     ]
     requests: list[dict[str, Any]] = []
+    auth_failures: list[str] = []
     command_auth = getattr(request, "param", False)
     token_file = workspace / "token"
     mode_file = workspace / "auth-mode"
@@ -105,6 +106,7 @@ def pi_fork_rig(
             "if mode == 'empty': sys.exit(0)\n"
             "print((root / 'token').read_text())\n"
         )
+        # Keep a shell after the helper so cleanup must reach its process group.
         auth = {
             "auth_command": shlex.join([sys.executable, str(helper)]) + "; code=$?; exit $code"
         }
@@ -118,9 +120,11 @@ def pi_fork_rig(
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             bearer = self.headers.get("Authorization")
             api_key = self.headers.get("X-Api-Key")
-            assert (
-                bearer == f"Bearer {token_file.read_text()}" or api_key == token_file.read_text()
-            )
+            expected = token_file.read_text()
+            if bearer != f"Bearer {expected}" and api_key != expected:
+                auth_failures.append("provider received an unexpected credential")
+                self.send_error(401, "Unexpected test credential")
+                return
             requests.append(body)
             if command_auth and len(requests) == 1:
                 token_file.write_text("rotated-during-tools")
@@ -200,6 +204,7 @@ def pi_fork_rig(
         sidecar.shutdown()
         sidecar.server_close()
         thread.join(timeout=5)
+        assert not auth_failures, auth_failures
 
 
 def test_pi_native_fork_rebuild_keeps_parallel_tool_results_adjacent(

@@ -3739,6 +3739,14 @@ const originalError = "API key auth failed for provider omnigent: " +
       assert.match(error.data.item_data.message, /exited unsuccessfully/);
       assert.match(notifications[0], /send another message/);
       assert.ok(!JSON.stringify(postedEvents).includes(file));
+      assert.ok(!fs.existsSync(path.join(authDir, `${file}.result.json`)));
+      postedEvents.length = 0;
+      await handlers.message_end({message: {
+        role: "assistant", provider: "omnigent", stopReason: "error", errorMessage: originalError,
+        content: [], timestamp: Date.now(),
+      }}, ctx);
+      const nextError = postedEvents.find(e => e.data && e.data.item_type === "error");
+      assert.equal(nextError.data.item_data.code, "RuntimeError");
     }
     assert.ok(!JSON.stringify(postedEvents).includes("DO-NOT-SHOW"));
   }

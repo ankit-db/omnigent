@@ -3,6 +3,11 @@ const fs = require("fs");
 const { spawn } = require("child_process");
 
 const configPath = process.argv[2];
+try {
+  fs.unlinkSync(`${configPath}.result.json`);
+} catch (_) {
+  // A previous attempt may have no result.
+}
 const started = performance.now();
 let deadline = Infinity;
 let child;
@@ -24,7 +29,7 @@ function finish(kind, token) {
   if (finished) return;
   finished = true;
   clearTimeout(timer);
-  if (kind !== "ok") killHelper();
+  killHelper();
   chunks = [];
   try {
     const result = {
@@ -57,7 +62,7 @@ process.on("exit", () => {
 try {
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
   if (typeof config.command !== "string" || !config.command.trim()) {
-    finish("invalid_command");
+    return finish("invalid_command");
   }
   deadline = started + config.timeoutMs;
   timer = setTimeout(() => finish("timeout"), Math.max(0, deadline - performance.now()));
