@@ -10384,6 +10384,16 @@
               }
             }
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid If-Match header"
+          },
           "409": {
             "content": {
               "application/json": {
@@ -10403,6 +10413,26 @@
               }
             },
             "description": "Agent changed; reload before saving"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request or bundle exceeds the size limit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "A JSON request body is required"
           },
           "422": {
             "content": {
@@ -10473,6 +10503,16 @@
               }
             },
             "description": "Bundle format cannot be edited"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Agent bundle exceeds the size limit"
           },
           "422": {
             "content": {

@@ -275,12 +275,19 @@ async def test_config_patch_preconditions_and_body_limit(client, monkeypatch) ->
         path, headers={**headers, "Content-Type": "text/plain"}, content="{}"
     )
     assert result.status_code == 415
+    assert result.json()["error"]["code"] == "invalid_input"
     monkeypatch.setattr(builtin_agents, "MAX_INSTALL_BUNDLE_BYTES", 1024)
     result = await client.patch(path, headers=headers, json={"instructions": "x" * 2048})
     assert result.status_code == 413
+    assert result.json()["error"]["code"] == "payload_too_large"
+    assert result.headers["cache-control"] == "no-store"
+    monkeypatch.setattr(builtin_agents, "MAX_INSTALL_BUNDLE_BYTES", 1)
+    result = await client.get(f"{path}/config", headers=ALICE)
+    assert result.status_code == 413
+    assert result.json()["error"]["code"] == "payload_too_large"
 
 
-@pytest.mark.parametrize("race", ["update", "delete", "artifact_failure"])
+@pytest.mark.parametrize("race", ["update", "identical_update", "delete", "artifact_failure"])
 async def test_config_patch_does_not_overwrite_racing_changes(
     client, agent_store, artifact_store, monkeypatch, race: str
 ) -> None:
@@ -296,6 +303,8 @@ async def test_config_patch_does_not_overwrite_racing_changes(
         original_put(location, data)
         if race == "delete":
             agent_store.delete(installed["id"])
+        elif race == "identical_update":
+            agent_store.update(installed["id"], location, description="loser")
         else:
             agent_store.update(installed["id"], before.bundle_location)
 
@@ -319,7 +328,14 @@ async def test_config_patch_does_not_overwrite_racing_changes(
         if race == "delete":
             assert after is None
         else:
-            assert after.bundle_location == before.bundle_location
+            if race == "identical_update":
+                assert after.bundle_location != before.bundle_location
+                assert artifact_store.get(after.bundle_location)
+                config = await client.get(f"{path}/config", headers=ALICE)
+                assert config.status_code == 200, config.text
+                assert config.json()["description"] == "loser"
+            else:
+                assert after.bundle_location == before.bundle_location
             assert after.version == before.version + 1
 
 

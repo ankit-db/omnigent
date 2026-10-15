@@ -273,16 +273,36 @@ def test_inline_mcp_yaml_scalar_names_and_values_use_root_parser(yaml_name, name
     assert not edit_agent_bundle(result, AgentConfigPatch(mcp_servers={name: None}))[1].mcp_servers
 
 
-def test_shadowed_mcp_declarations_are_not_edited():
-    bundle = bundle_files(
-        {
-            "config.yaml": _CONFIG + b"tools:\n  docs: {type: mcp, future: managed}\n",
-            "tools/mcp/docs.yaml": b"name: docs\ntransport: http\nurl: https://example.com/mcp\n",
-        }
-    )
+@pytest.mark.parametrize(
+    "files,name",
+    [
+        (
+            {
+                "config.yaml": _CONFIG + b"tools:\n  docs: {type: mcp, future: managed}\n",
+                "tools/mcp/docs.yaml": b"name: docs\ntransport: http\nurl: https://example.com/mcp\n",
+            },
+            "docs",
+        ),
+        (
+            {
+                "config.yaml": _CONFIG
+                + (
+                    b"tools:\n  true: {type: mcp, future: managed}\n"
+                    b'  "True": {type: mcp, url: https://example.com/mcp}\n'
+                ),
+            },
+            "True",
+        ),
+    ],
+)
+@pytest.mark.parametrize("patch", [None, {"description": "updated"}])
+def test_shadowed_mcp_declarations_are_not_edited(files, name, patch):
+    bundle = bundle_files(files)
+    assert edit_agent_bundle(bundle, None)[1].mcp_servers[0].name == name
     with pytest.raises(HTTPException) as caught:
-        edit_agent_bundle(bundle, AgentConfigPatch(mcp_servers={"docs": None}))
+        edit_agent_bundle(bundle, AgentConfigPatch.model_validate({"mcp_servers": {name: patch}}))
     assert caught.value.status_code == 409
+    assert caught.value.detail["message"] == "Ambiguous MCP declarations cannot be edited"
 
 
 def test_inline_ignored_fields_survive_noop_and_unrelated_edit():

@@ -197,7 +197,15 @@ class _AgentRoute(APIRoute):
             except RequestValidationError:
                 return _config_error(422, "invalid_input", "Invalid agent configuration patch")
             except HTTPException as exc:
-                if isinstance(exc.detail, dict):
+                if exc.status_code == 413:
+                    return _config_error(
+                        413,
+                        "payload_too_large",
+                        "Agent configuration or request exceeds the size limit",
+                    )
+                if exc.status_code == 415:
+                    return _config_error(415, "invalid_input", "A JSON request body is required")
+                if isinstance(exc.detail, dict) and {"code", "message"} <= exc.detail.keys():
                     return _config_error(
                         exc.status_code, exc.detail["code"], exc.detail["message"]
                     )
@@ -360,6 +368,7 @@ def create_builtin_agents_router(
         responses={
             200: {"headers": {"ETag": {"schema": {"type": "string"}}}},
             409: {"model": ErrorResponse, "description": "Bundle format cannot be edited"},
+            413: {"model": ErrorResponse, "description": "Agent bundle exceeds the size limit"},
         },
     )
     async def get_agent_config(
@@ -376,8 +385,14 @@ def create_builtin_agents_router(
         response_model=AgentConfigObject,
         responses={
             200: {"headers": {"ETag": {"schema": {"type": "string"}}}},
+            400: {"model": ErrorResponse, "description": "Invalid If-Match header"},
             409: {"model": ErrorResponse, "description": "Configuration cannot be edited"},
             412: {"model": ErrorResponse, "description": "Agent changed; reload before saving"},
+            413: {
+                "model": ErrorResponse,
+                "description": "Request or bundle exceeds the size limit",
+            },
+            415: {"model": ErrorResponse, "description": "A JSON request body is required"},
             422: {"model": ErrorResponse, "description": "Invalid partial configuration"},
             428: {"model": ErrorResponse, "description": "If-Match is required"},
         },
@@ -416,6 +431,7 @@ def create_builtin_agents_router(
             agent_store.update_configuration, agent, location, description=description
         )
         if updated is None:
+            # A concurrent identical edit may reference this same content-addressed artifact.
             return _config_error(412, "precondition_failed", "Agent changed; reload before saving")
         agent_cache.evict(agent.id)
         _config_headers(response, updated)

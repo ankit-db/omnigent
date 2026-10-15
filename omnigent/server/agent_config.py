@@ -88,7 +88,10 @@ def _edit_mcp(
         server = servers.get(name)
         location = _find_mcp_location(root, name)
         tools = config.get("tools") or {}
-        inline_key = next((key for key in tools if str(key) == name), name)
+        matching = [key for key in tools if str(key) == name]
+        if len(matching) > 1:
+            raise _not_editable("Ambiguous MCP declarations cannot be edited")
+        inline_key = matching[0] if matching else name
         inline = tools.get(inline_key)
         if isinstance(inline, dict) and inline.get("type") == "mcp":
             if location is not None and location.source == "file":

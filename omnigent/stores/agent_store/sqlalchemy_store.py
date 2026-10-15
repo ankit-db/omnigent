@@ -391,7 +391,11 @@ class SqlAlchemyAgentStore(AgentStore):
         description: str | None,
         created_by: str | None = None,
     ) -> Agent | None:
-        """Atomically compare the observed revision and replace its configuration."""
+        """Atomically compare the observed revision and replace its configuration.
+
+        Identical delete/recreate within one second can match the old revision;
+        creation timestamps have second precision and versions restart at one.
+        """
         matches = (
             SqlAgent.workspace_id == current_workspace_id(),
             SqlAgent.id == expected.id,
