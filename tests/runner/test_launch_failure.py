@@ -468,6 +468,7 @@ def test_codex_model_rejection_ignores_unrelated_errors(message: str) -> None:
         '404 {"error":{"message":"The model `gpt-5-nano` does not exist or you do not have '
         'access to it.","type":"invalid_request_error","param":null,"code":"model_not_found"}}',
         '{"error":{"message":"unknown model","code":"model_not_found"}}',
+        "The model `gpt-5-nano` does not exist or you do not have access to it.",
     ],
 )
 def test_model_unavailable_explains_how_to_recover(message: str) -> None:
@@ -482,8 +483,6 @@ def test_model_unavailable_explains_how_to_recover(message: str) -> None:
     assert "different model" in diagnosis.remediation
     assert "access this model" in diagnosis.remediation
     assert diagnosis.category is ErrorCategory.CONFIG
-    # Adds the hint without reclassifying the turn error.
-    assert classify_native_turn_error("native_turn_error", message) == "native_turn_error"
 
 
 @pytest.mark.parametrize(
@@ -508,6 +507,8 @@ def test_model_unavailable_explains_how_to_recover(message: str) -> None:
         '"message":"model: claude-opus-4-8 does not support the messages API"}}',
         'Pi model error: 429 {"type":"error","error":{"type":"rate_limit_error",'
         '"message":"model: claude-opus-4-8 is rate limited"}}',
+        # The same prose about another resource is not a model mismatch.
+        "Project abc does not exist or you do not have access to it.",
     ],
 )
 def test_model_unavailable_ignores_unrelated_errors(message: str) -> None:

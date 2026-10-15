@@ -16,6 +16,7 @@ no handling here.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -116,7 +117,13 @@ def _stop_respawned_runner(respawned: subprocess.Popen[bytes] | None) -> None:
         respawned.wait(timeout=5)
     except Exception:  # best-effort teardown
         respawned.kill()
-        respawned.wait(timeout=5)
+        with contextlib.suppress(Exception):
+            respawned.wait(timeout=5)
+
+
+def _delete_session(base_url: str, session_id: str) -> None:
+    with contextlib.suppress(httpx.HTTPError):  # best-effort cleanup
+        httpx.delete(f"{base_url}/v1/sessions/{session_id}", timeout=30.0)
 
 
 def _type_and_submit(page: Page, text: str) -> None:
@@ -135,7 +142,6 @@ def _expanded_pill_text(page: Page) -> str:
     if toggle.count():
         toggle.first.click()
     expect(pill.get_by_test_id("error-message-content")).to_be_visible(timeout=15_000)
-    page.wait_for_timeout(2_500)
     return pill.inner_text()
 
 
@@ -146,7 +152,7 @@ def _chat_texts(page: Page) -> list[str]:
         toggle = pill.locator('button[aria-expanded="false"]')
         if toggle.count():
             toggle.first.click()
-            page.wait_for_timeout(1_000)
+            expect(pill.get_by_test_id("error-message-content")).to_be_visible(timeout=15_000)
         texts.append(pill.inner_text())
     texts.extend(page.locator('[data-testid="message-bubble"]').all_inner_texts())
     return texts
@@ -158,7 +164,13 @@ def _persisted_errors(base_url: str, session_id: str) -> list[dict[str, object]]
         return [{"status": response.status_code}]
     body = response.json()
     items = body.get("data", body) if isinstance(body, dict) else body
-    return [item.get("data", item) for item in items if item.get("type") == "error"]
+    if not isinstance(items, list):
+        return [{"unexpected_body": str(body)[:500]}]
+    return [
+        item.get("data", item)
+        for item in items
+        if isinstance(item, dict) and item.get("type") == "error"
+    ]
 
 
 def _screenshot(page: Page, name: str) -> None:
@@ -167,18 +179,13 @@ def _screenshot(page: Page, name: str) -> None:
         page.screenshot(path=str(Path(screenshot_dir) / f"{name}.png"))
 
 
-def _open_terminal_until_connected(page: Page) -> str:
+def _open_terminal_until_connected(page: Page) -> None:
     expect(page.get_by_test_id("view-mode-toggle")).to_be_visible(timeout=60_000)
     page.get_by_test_id("view-mode-terminal").click()
     terminal = page.locator('[data-testid="terminal-view"]').last
-    try:
-        expect(terminal).to_have_attribute("data-state", "connected", timeout=120_000)
-        state = "connected"
-    except AssertionError:
-        state = str(terminal.get_attribute("data-state"))
+    expect(terminal).to_have_attribute("data-state", "connected", timeout=120_000)
     page.wait_for_timeout(2_000)
     page.get_by_test_id("view-mode-chat").click()
-    return state
 
 
 @pytest.mark.timeout(600)
@@ -228,7 +235,7 @@ def test_claude_sdk_model_unavailable_card_shows_recovery_hint_live_and_after_re
                     "model-unavailable card"
                 )
         finally:
-            httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+            _delete_session(live_server, session_id)
     finally:
         _stop_respawned_runner(respawned)
 
@@ -257,7 +264,7 @@ def test_pi_native_model_unavailable_shows_guidance_live_and_after_reload(
             try:
                 _drive_pi_journey(request, live_server, session_id)
             finally:
-                httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=30.0)
+                _delete_session(live_server, session_id)
     finally:
         _stop_respawned_runner(respawned)
 
@@ -265,26 +272,26 @@ def test_pi_native_model_unavailable_shows_guidance_live_and_after_reload(
 def _drive_pi_journey(request: pytest.FixtureRequest, live_server: str, session_id: str) -> None:
     page: Page = request.getfixturevalue("page")
     page.goto(f"{live_server}/c/{session_id}")
-    print(f"terminal state: {_open_terminal_until_connected(page)}")
+    _open_terminal_until_connected(page)
     _screenshot(page, "pi-native-launch")
-    if page.get_by_role("textbox", name="Message the agent").is_enabled():
+    composer = page.get_by_role("textbox", name="Message the agent")
+    if composer.is_enabled():
         _type_and_submit(page, _PROMPT)
-    outcome = page.get_by_test_id("error-pill").or_(
-        page.locator('[data-testid="message-bubble"][data-role="assistant"]')
-    )
+    else:
+        print("composer disabled: Pi refused the model at launch; reading its launch card")
     try:
-        expect(outcome.first).to_be_visible(timeout=_TURN_TIMEOUT_MS)
+        expect(page.get_by_test_id("error-pill").first).to_be_visible(timeout=_TURN_TIMEOUT_MS)
     except AssertionError:
         snapshot = httpx.get(f"{live_server}/v1/sessions/{session_id}", timeout=10.0).json()
         print(
-            f"no outcome within {_TURN_TIMEOUT_MS} ms: status={snapshot.get('status')} "
+            f"no error card within {_TURN_TIMEOUT_MS} ms: status={snapshot.get('status')} "
             f"last_task_error={json.dumps(snapshot.get('last_task_error'))}"
         )
+        bubbles = page.locator('[data-testid="message-bubble"]').all_inner_texts()
+        print(f"bubbles: {json.dumps(bubbles)}")
         print(f"pi persisted errors: {json.dumps(_persisted_errors(live_server, session_id))}")
         raise
-    page.wait_for_timeout(2_000)
     screens = {"live": _chat_texts(page)}
-    page.wait_for_timeout(2_500)
     _screenshot(page, "pi-native-live")
 
     page.reload()
@@ -292,7 +299,6 @@ def _drive_pi_journey(request: pytest.FixtureRequest, live_server: str, session_
     page.get_by_test_id("view-mode-chat").click()
     expect(page.get_by_test_id("error-pill").first).to_be_visible(timeout=60_000)
     screens["reload"] = _chat_texts(page)
-    page.wait_for_timeout(2_500)
     _screenshot(page, "pi-native-reload")
 
     print(f"pi persisted errors: {json.dumps(_persisted_errors(live_server, session_id))[:3000]}")

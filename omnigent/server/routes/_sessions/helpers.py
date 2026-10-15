@@ -3356,7 +3356,7 @@ def _diagnose_external_error(data: ErrorData) -> ErrorData:
     Pi mirrors provider rejections verbatim (``Pi model error: 404 …``) with no
     next step; a harness that already classified its failure keeps its own card.
     """
-    if data.level == "info" or data.title or data.remediation:
+    if data.level == "info" or data.title or data.cause or data.remediation:
         return data
     diagnosis = diagnose_model_unavailable(data.message)
     if diagnosis is None:

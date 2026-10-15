@@ -330,11 +330,13 @@ def diagnose_codex_model_rejection(message: str) -> FailureDiagnosis | None:
 _MODEL_UNAVAILABLE_MARKER = "issue with the selected model"
 # Anthropic's not-found body for an unknown model id, as a harness forwards it:
 # `404 {"type":"error","error":{"type":"not_found_error","message":"model: <id>"}}`.
-_ANTHROPIC_MODEL_NOT_FOUND = re.compile(r'"message"\s*:\s*"model:\s*[^"\s]+"')
-_NOT_FOUND_STATUS = re.compile(r"\b404\b|not_found_error")
-# OpenAI's rejection of an unknown or inaccessible model id.
+_ANTHROPIC_MODEL_NOT_FOUND = re.compile(r'"message"\s*:\s*"model:\s*[^"\s]+"', re.IGNORECASE)
+_NOT_FOUND_STATUS = re.compile(r"\b404\b|not_found_error", re.IGNORECASE)
+# OpenAI's rejection of an unknown or inaccessible model id; the prose form must
+# name the model so other "does not exist" resource errors stay unlabeled.
 _OPENAI_MODEL_NOT_FOUND = re.compile(
-    r'"code"\s*:\s*"model_not_found"|does not exist or you do not have access to it',
+    r'"code"\s*:\s*"model_not_found"'
+    r"|\bmodel\b[^\n]{0,120}?does not exist or you do not have access to it",
     re.IGNORECASE,
 )
 

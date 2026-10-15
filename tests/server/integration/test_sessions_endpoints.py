@@ -12926,6 +12926,20 @@ _MODEL_UNAVAILABLE_REMEDIATION = (
             {
                 "source": "execution",
                 "code": "RuntimeError",
+                "message": _PI_MODEL_NOT_FOUND,
+                "cause": "The provider rejected the pinned model.",
+            },
+            {
+                "title": None,
+                "cause": "The provider rejected the pinned model.",
+                "remediation": None,
+            },
+            id="poster-cause-preserved",
+        ),
+        pytest.param(
+            {
+                "source": "execution",
+                "code": "RuntimeError",
                 "message": (
                     'Pi model error: 401 {"type":"error","error":{"type":"authentication_error",'
                     '"message":"invalid x-api-key"}}'
