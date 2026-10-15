@@ -17,7 +17,6 @@ from pathlib import Path
 import httpx
 import pytest
 
-from omnigent.harness_startup_config import resolve_harness_path
 from omnigent.inner.executor import ExecutorError, TextChunk, ToolCallComplete, TurnComplete
 from omnigent.inner.pi_harness import _build_pi_executor
 from tests.e2e._harness_probes import skip_if_harness_cli_missing
@@ -169,10 +168,6 @@ async def test_pi_session_stays_in_sync_after_retry_recovery(
     monkeypatch.setattr("omnigent.inner.pi_settings.DEFAULT_PI_AGENT_DIR", home / ".pi" / "agent")
     monkeypatch.setenv("HARNESS_PI_SKILLS_FILTER", '"none"')
     if sandboxed:
-        pi_binary = resolve_harness_path("pi") or shutil.which("pi")
-        assert pi_binary is not None
-        pi_path = Path(pi_binary).resolve()
-        pi_install = next((p for p in pi_path.parents if p.name == "node_modules"), pi_path.parent)
         monkeypatch.setenv(
             "HARNESS_PI_OS_ENV",
             json.dumps(
@@ -180,11 +175,8 @@ async def test_pi_session_stays_in_sync_after_retry_recovery(
                     "type": "caller_process",
                     "sandbox": {
                         "type": "darwin_seatbelt" if sys.platform == "darwin" else "linux_bwrap",
-                        # Both test installations live outside the isolated workspace.
-                        "read_paths": [
-                            str(Path(__file__).resolve().parents[3] / "omnigent"),
-                            str(pi_install),
-                        ],
+                        # The editable Python install is outside the workspace.
+                        "read_paths": [str(Path(__file__).resolve().parents[3] / "omnigent")],
                     },
                 }
             ),
@@ -209,7 +201,10 @@ async def test_pi_session_stays_in_sync_after_retry_recovery(
     try:
         assert executor._sandboxed is sandboxed
         first = await _run_turn(executor, _FIRST_PROMPT)
-        assert _errors(first) == []
+        assert _errors(first) == [], (
+            "the first turn was reported as a failure instead of completing with pi's "
+            f"recovered answer: {_errors(first)}"
+        )
         rpc = executor._session_states[_SESSION_ID].rpc
         assert rpc is not None and rpc.process is not None and rpc._tmp_dir is not None
         pid, agent_dir = rpc.process.pid, Path(rpc._tmp_dir)
@@ -239,10 +234,6 @@ async def test_pi_session_stays_in_sync_after_retry_recovery(
     assert _streamed_text(third) == "THIRD_ANSWER"
     assert any(isinstance(e, ToolCallComplete) for e in first)
     assert accepted == [True] * 7
-    assert _errors(first) == [], (
-        "the first turn was reported as a failure instead of completing with pi's "
-        f"recovered answer: {_errors(first)}"
-    )
     first_complete = [e for e in first if isinstance(e, TurnComplete)]
     assert [_FIRST_ANSWER in (t.response or "") for t in first_complete] == [True], (
         f"the first turn did not complete with {_FIRST_ANSWER!r}: {first}"
