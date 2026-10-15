@@ -156,9 +156,13 @@ def edit_agent_bundle(bundle: bytes, patch: AgentConfigPatch | None) -> tuple[by
     try:
         return _edit_agent_bundle(bundle, patch)
     except OmnigentError as exc:
-        if exc.code == ErrorCode.FORBIDDEN:
+        if exc.code in {ErrorCode.FORBIDDEN, ErrorCode.INTERNAL_ERROR}:
             raise
-    except (ExtractionError, yaml.YAMLError, ValueError, TypeError, OSError, tarfile.TarError):
+    except OSError:
+        raise OmnigentError(
+            "Agent configuration edit failed", code=ErrorCode.INTERNAL_ERROR
+        ) from None
+    except (ExtractionError, yaml.YAMLError, ValueError, TypeError, tarfile.TarError):
         pass
     # Loader and schema exceptions can contain credentials, including in chained tracebacks.
     raise OmnigentError("Invalid agent configuration", code=ErrorCode.INVALID_INPUT) from None

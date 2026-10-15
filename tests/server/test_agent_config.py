@@ -408,6 +408,31 @@ def test_invalid_stored_bundle_errors_are_sanitized(config, caplog):
     assert "private-secret" not in caplog.text
 
 
+@pytest.mark.parametrize(
+    "failure_site,message",
+    [
+        ("omnigent.server.bundles.load", "Agent bundle validation failed"),
+        ("omnigent.server.agent_config.extract_safe", "Agent configuration edit failed"),
+    ],
+)
+def test_filesystem_failures_are_sanitized_server_errors(
+    monkeypatch, caplog, failure_site, message
+):
+    def fail(*args, **kwargs):
+        raise OSError("No space left on device: private-path")
+
+    monkeypatch.setattr(failure_site, fail)
+    with pytest.raises(OmnigentError) as caught:
+        edit_agent_bundle(
+            bundle_files({"config.yaml": _CONFIG}), AgentConfigPatch(description="updated")
+        )
+    assert caught.value.code == ErrorCode.INTERNAL_ERROR
+    assert caught.value.http_status == 500
+    assert str(caught.value) == message
+    assert "private-path" not in "".join(traceback.format_exception(caught.value))
+    assert "private-path" not in caplog.text
+
+
 def test_unsupported_format_and_incompatible_executor_options():
     legacy = bundle_files(
         {"agent.yaml": b"name: old\nprompt: hi\nexecutor: {harness: claude-sdk}\n"}
