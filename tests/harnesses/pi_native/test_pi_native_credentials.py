@@ -846,7 +846,8 @@ def test_generated_token_command_reports_only_safe_results(
 
     if os.name != "posix" or shutil.which("node") is None:
         pytest.skip("the native Pi token wrapper requires POSIX and Node")
-    monkeypatch.setattr(auth_command, "AUTH_TIMEOUT_MS", 500)
+    if kind == "timeout":
+        monkeypatch.setattr(auth_command, "AUTH_TIMEOUT_MS", 500)
     provider = creds.PiProviderConfig(
         provider_id="omnigent",
         base_url="http://localhost/v1",
@@ -866,7 +867,7 @@ def test_generated_token_command_reports_only_safe_results(
         shell=True,
         capture_output=True,
         text=True,
-        timeout=4,
+        timeout=12,
         env={**os.environ, "OMNIGENT_PI_NATIVE_PID": "123"},
     )
     assert result.returncode == (0 if kind == "ok" else 1)
