@@ -24,6 +24,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import anyio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
@@ -415,9 +416,12 @@ def create_host_tunnel_router(
                 ),
             )
 
-            async with conn.diagnostics.monitoring(
-                report_diagnostics, connection_id=frame.connection_id
-            ):
+            async with contextlib.AsyncExitStack() as diagnostics_cleanup:
+                await diagnostics_cleanup.enter_async_context(
+                    conn.diagnostics.monitoring(
+                        report_diagnostics, connection_id=frame.connection_id
+                    )
+                )
                 sender_task = asyncio.create_task(
                     _sender_loop(ws, conn),
                     name=f"host-sender:{host_id}",
@@ -480,19 +484,23 @@ def create_host_tunnel_router(
                 finally:
                     conn.diagnostics.freeze()
                     disconnect_attrs = connection_attrs()
-                    for task in (sender_task, ping_task, receive_task, heartbeat_task):
-                        task.cancel()
-                    await asyncio.gather(
-                        sender_task,
-                        ping_task,
-                        receive_task,
-                        heartbeat_task,
-                        return_exceptions=True,
-                    )
-                    # If the host already reconnected, this handler's connection
-                    # was replaced; only the current one may mark it offline.
-                    if host_registry.deregister(host_id, conn=conn):
-                        await asyncio.to_thread(host_store.set_offline, host_id)
+                    # ASGI cancellation must not interrupt offline persistence
+                    # or leave the diagnostics monitor running after disconnect.
+                    with anyio.CancelScope(shield=True):
+                        for task in (sender_task, ping_task, receive_task, heartbeat_task):
+                            task.cancel()
+                        await asyncio.gather(
+                            sender_task,
+                            ping_task,
+                            receive_task,
+                            heartbeat_task,
+                            return_exceptions=True,
+                        )
+                        # If the host already reconnected, this handler's connection
+                        # was replaced; only the current one may mark it offline.
+                        if host_registry.deregister(host_id, conn=conn):
+                            await asyncio.to_thread(host_store.set_offline, host_id)
+                        await diagnostics_cleanup.aclose()
                     if on_host_disconnect is not None:
                         try:
                             await on_host_disconnect(host_id, tunnel_owner)

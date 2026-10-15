@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from sqlalchemy import event, update
+from sqlalchemy import event, insert, update
 from sqlalchemy.orm import Session
 
-from omnigent.db.db_models import SqlHost, workspace_scope
+from omnigent.db.account_authority import account_authority_scope
+from omnigent.db.db_models import SqlHost, SqlUser, current_workspace_id, workspace_scope
 from omnigent.db.utils import get_or_create_engine, now_epoch
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
@@ -737,6 +739,212 @@ def test_upsert_conflict_preserves_created_at(
     assert fetched[0].created_at == original_created
     # updated_at should be >= the original (reconnect bumps it).
     assert fetched[0].updated_at >= original_created
+
+
+_RESERVED_HOST_ID = "ab" * 16
+
+
+def _reserve(
+    host_store: HostStore, *, owner: str = "alice@example.test", provider: str = "modal"
+) -> Host | None:
+    return host_store.reserve_sandbox_host(
+        host_id=_RESERVED_HOST_ID, name="managed-host", user_id=owner, provider=provider
+    )
+
+
+def test_reservation_is_durable_offline_and_tokenless(host_store: HostStore, db_uri: str) -> None:
+    reserved = _reserve(host_store)
+    assert reserved is not None
+    assert reserved == HostStore(db_uri).get_host(_RESERVED_HOST_ID)
+    assert reserved.user_id == "alice@example.test"
+    assert reserved.sandbox_provider == "modal"
+    assert reserved.sandbox_id is None
+    assert not host_store.is_online(_RESERVED_HOST_ID)
+    with host_store._session("test_reservation_credentials") as session:
+        row = session.get(SqlHost, (current_workspace_id(), _RESERVED_HOST_ID))
+        assert row is not None
+        assert row.token_hash is None
+        assert row.token_expires_at is None
+    assert _reserve(host_store) == reserved
+
+
+def test_reservation_preserves_live_host_and_credentials(host_store: HostStore) -> None:
+    host_store.register_managed_host(
+        host_id=_RESERVED_HOST_ID,
+        name="existing-host",
+        user_id="alice@example.test",
+        token="launch-token",
+        provider="modal",
+        sandbox_id="existing-environment",
+        token_expires_at=2**31,
+    )
+    connected = host_store.upsert_on_connect(
+        _RESERVED_HOST_ID,
+        "existing-host",
+        "alice@example.test",
+        configured_harnesses={"codex": True},
+        managed_token="launch-token",
+    )
+    assert _reserve(host_store) == connected
+    assert host_store.resolve_launch_token(_RESERVED_HOST_ID, "launch-token") == connected
+    assert host_store.is_online(_RESERVED_HOST_ID)
+
+
+def test_reservation_rejects_another_owner(host_store: HostStore) -> None:
+    connected = host_store.upsert_on_connect(
+        _RESERVED_HOST_ID, "existing-host", "alice@example.test"
+    )
+    with pytest.raises(ValueError, match="different user"):
+        _reserve(host_store, owner="bob@example.com")
+    assert host_store.get_host(_RESERVED_HOST_ID) == connected
+
+
+def test_reservation_is_workspace_scoped(host_store: HostStore) -> None:
+    first = _reserve(host_store)
+    with workspace_scope(current_workspace_id() + 1):
+        second = _reserve(host_store, owner="bob@example.com")
+        assert second is not None
+        assert second.user_id == "bob@example.com"
+    assert host_store.get_host(_RESERVED_HOST_ID) == first
+
+
+def test_reservation_and_binding_reject_conflicting_sandbox(host_store: HostStore) -> None:
+    _reserve(host_store)
+    bound = host_store.bind_sandbox(
+        _RESERVED_HOST_ID, provider="modal", sandbox_id="existing-environment"
+    )
+    assert bound is not None
+    assert _reserve(host_store, provider="kubernetes") is None
+    assert _reserve(host_store) == bound
+    assert (
+        host_store.bind_sandbox(
+            _RESERVED_HOST_ID, provider="modal", sandbox_id="other-environment"
+        )
+        is None
+    )
+    assert (
+        host_store.bind_sandbox(
+            _RESERVED_HOST_ID, provider="kubernetes", sandbox_id="existing-environment"
+        )
+        is None
+    )
+    assert host_store.get_host(_RESERVED_HOST_ID) == bound
+
+
+def test_reservation_cannot_revive_deleted_host(host_store: HostStore) -> None:
+    _reserve(host_store)
+    host_store.bind_sandbox(_RESERVED_HOST_ID, provider="modal", sandbox_id="environment")
+    assert host_store.delete_host(_RESERVED_HOST_ID) is not None
+    assert _reserve(host_store) is None
+    assert (
+        host_store.bind_sandbox(_RESERVED_HOST_ID, provider="modal", sandbox_id="environment")
+        is None
+    )
+    assert host_store.get_host(_RESERVED_HOST_ID) is None
+
+
+def test_stale_request_cannot_reserve_host(host_store: HostStore) -> None:
+    with account_authority_scope("alice@example.test", "revoked-generation"):
+        with pytest.raises(OmnigentError, match="authority has been revoked"):
+            _reserve(host_store)
+    assert host_store.get_host(_RESERVED_HOST_ID) is None
+
+
+@pytest.mark.parametrize("operation", ["reserve", "bind"])
+def test_sandbox_metadata_cannot_cross_account_generation(
+    host_store: HostStore, operation: str
+) -> None:
+    with host_store._engine.begin() as connection:
+        connection.execute(
+            insert(SqlUser).values(
+                workspace_id=current_workspace_id(),
+                id="alice@example.test",
+                account_generation="old-generation",
+            )
+        )
+    reserved = _reserve(host_store)
+    with host_store._engine.begin() as connection:
+        connection.execute(
+            update(SqlUser)
+            .where(
+                SqlUser.workspace_id == current_workspace_id(), SqlUser.id == "alice@example.test"
+            )
+            .values(account_generation="new-generation")
+        )
+    with pytest.raises(OmnigentError, match="authority has been revoked"):
+        if operation == "reserve":
+            _reserve(host_store)
+        else:
+            host_store.bind_sandbox(_RESERVED_HOST_ID, provider="modal", sandbox_id="environment")
+    assert host_store.get_host(_RESERVED_HOST_ID) == reserved
+
+
+def test_connection_racing_reservation_keeps_managed_classification(host_store: HostStore) -> None:
+    workspace_id = current_workspace_id()
+    barrier = threading.Barrier(2)
+
+    def connect() -> None:
+        with workspace_scope(workspace_id):
+            barrier.wait(timeout=5)
+            host_store.upsert_on_connect(
+                _RESERVED_HOST_ID,
+                "managed-host",
+                "alice@example.test",
+                configured_harnesses={"codex": True},
+            )
+
+    def reserve() -> None:
+        with workspace_scope(workspace_id):
+            barrier.wait(timeout=5)
+            assert _reserve(host_store) is not None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        connected = executor.submit(connect)
+        reserved = executor.submit(reserve)
+        connected.result(timeout=10)
+        reserved.result(timeout=10)
+    host = host_store.get_host(_RESERVED_HOST_ID)
+    assert host is not None
+    assert host.sandbox_provider == "modal"
+    assert host.configured_harnesses == {"codex": True}
+    assert host_store.is_online(_RESERVED_HOST_ID)
+
+
+@pytest.mark.parametrize("connect_first", [False, True])
+def test_binding_preserves_connection_liveness(
+    host_store: HostStore, db_uri: str, connect_first: bool
+) -> None:
+    if connect_first:
+        host_store.upsert_on_connect(_RESERVED_HOST_ID, "managed-host", "alice@example.test")
+        _set_updated_at(db_uri, _RESERVED_HOST_ID, 1)
+    reserved = _reserve(host_store)
+    assert reserved is not None
+    bound = host_store.bind_sandbox(_RESERVED_HOST_ID, provider="modal", sandbox_id="environment")
+    assert bound is not None
+    assert bound.updated_at == reserved.updated_at
+    assert bound.status == reserved.status
+    assert not host_store.is_online(_RESERVED_HOST_ID)
+    connected = host_store.upsert_on_connect(
+        _RESERVED_HOST_ID, "managed-host", "alice@example.test"
+    )
+    assert connected.sandbox_provider == "modal"
+    assert connected.sandbox_id == "environment"
+    assert host_store.is_online(_RESERVED_HOST_ID)
+
+
+def test_binding_cannot_reactivate_sandbox_pending_termination(host_store: HostStore) -> None:
+    assert host_store.bind_sandbox(_RESERVED_HOST_ID, provider="modal", sandbox_id="old") is None
+    _reserve(host_store)
+    bound = host_store.bind_sandbox(_RESERVED_HOST_ID, provider="modal", sandbox_id="old")
+    assert bound is not None
+    assert host_store.detach_stale_managed_sandbox(
+        _RESERVED_HOST_ID, sandbox_id="old", expected_updated_at=bound.updated_at
+    )
+    assert host_store.bind_sandbox(_RESERVED_HOST_ID, provider="modal", sandbox_id="old") is None
+    replacement = host_store.bind_sandbox(_RESERVED_HOST_ID, provider="modal", sandbox_id="new")
+    assert replacement is not None
+    assert replacement.sandbox_id == "new"
+    assert replacement.terminating_sandbox_id == "old"
 
 
 # ── Managed-host credential methods ────────────────────────

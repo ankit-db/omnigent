@@ -871,6 +871,103 @@ class HostStore:
                 return None
             return _row_to_host(row)
 
+    def reserve_sandbox_host(
+        self, *, host_id: str, name: str, user_id: str, provider: str
+    ) -> Host | None:
+        """Classify a self-registering sandbox before provisioning starts.
+
+        New reservations are offline and have no launch token. A connection
+        arriving after a launch timeout retains this classification. Existing
+        rows keep their liveness, credentials, identity and sandbox binding.
+        Returns None for a deleted host or a conflicting provider.
+        """
+
+        def write(session: Session) -> Host | None:
+            generation = require_active_account(session, user_id)
+            row = session.execute(
+                select(SqlHost)
+                .where(
+                    SqlHost.workspace_id == current_workspace_id(),
+                    SqlHost.host_id == host_id,
+                )
+                .with_for_update()
+            ).scalar_one_or_none()
+            if row is None:
+                now = now_epoch()
+                row = SqlHost(
+                    account_generation=generation,
+                    user_id=user_id,
+                    name=name,
+                    host_id=host_id,
+                    status=encode_host_status("offline"),
+                    created_at=now,
+                    updated_at=now,
+                    sandbox_provider=provider,
+                )
+                session.add(row)
+            else:
+                if row.deleted_at is not None:
+                    return None
+                if row.user_id != user_id:
+                    raise ValueError(
+                        f"host {host_id!r} is registered to a different user; "
+                        "refusing to reserve it"
+                    )
+                require_active_account(session, user_id, generation=row.account_generation)
+                if row.sandbox_provider not in {None, provider}:
+                    return None
+                row.sandbox_provider = provider
+            return _row_to_host(row)
+
+        try:
+            return run_write_transaction(self._lifecycle_session, "reserve_sandbox_host", write)
+        except IntegrityError:
+            # A host connection can insert after our missing-row read. Retry
+            # under the lifecycle lock; ownership and provider checks still apply.
+            return run_write_transaction(self._lifecycle_session, "reserve_sandbox_host", write)
+
+    def bind_sandbox(self, host_id: str, *, provider: str, sandbox_id: str) -> Host | None:
+        """Attach a provider's sandbox ID without changing credentials or liveness.
+
+        Call after provisioning, before waiting for a self-registering host.
+        Missing, deleted or conflicting bindings fail closed. Metadata writes
+        must not refresh a disconnected host's heartbeat.
+        """
+        with self._lifecycle_session("bind_host_sandbox") as session:
+            owner = session.execute(
+                select(SqlHost.user_id, SqlHost.account_generation).where(
+                    SqlHost.workspace_id == current_workspace_id(),
+                    SqlHost.host_id == host_id,
+                )
+            ).one_or_none()
+            if owner is None:
+                return None
+            # Lock the account before the host, matching account deletion.
+            require_active_account(session, owner.user_id, generation=owner.account_generation)
+            row = session.execute(
+                select(SqlHost)
+                .where(
+                    SqlHost.workspace_id == current_workspace_id(),
+                    SqlHost.host_id == host_id,
+                )
+                .with_for_update()
+            ).scalar_one_or_none()
+            if row is None or row.deleted_at is not None:
+                return None
+            if (row.user_id, row.account_generation) != tuple(owner):
+                return None
+            if row.terminating_sandbox_id == sandbox_id:
+                return None
+            if row.sandbox_provider not in {None, provider}:
+                return None
+            if row.sandbox_id not in {None, sandbox_id}:
+                return None
+            row.sandbox_provider = provider
+            row.sandbox_id = sandbox_id
+            # Binding metadata is not a heartbeat: a crashed host whose status
+            # still says online must remain stale until it actually reconnects.
+            return _row_to_host(row)
+
     def register_managed_host(
         self,
         *,

@@ -8,6 +8,7 @@ import logging
 import threading
 import time
 
+import anyio
 import pytest
 from asgiref.testing import ApplicationCommunicator
 from fastapi import FastAPI
@@ -587,7 +588,10 @@ async def test_host_replacement_names_retirement_without_inventing_close_code(
         await asyncio.gather(old.future, return_exceptions=True)
 
 
-async def test_host_tunnel_cancel_during_connect_callback_cleans_up_workers(db_uri: str) -> None:
+@pytest.mark.parametrize("cancellation", ["task", "scope"])
+async def test_host_tunnel_cancel_during_connect_callback_cleans_up_workers(
+    db_uri: str, cancellation: str
+) -> None:
     registry = HostRegistry()
     store = HostStore(db_uri)
     app = FastAPI()
@@ -601,7 +605,14 @@ async def test_host_tunnel_cancel_during_connect_callback_cleans_up_workers(db_u
         create_host_tunnel_router(registry, store, on_host_connect=on_connect),
         prefix="/v1",
     )
-    comm = await _connect_route(app, _TUNNEL_PATH)
+    cancel_scopes: list[anyio.CancelScope] = []
+
+    async def cancellable_app(scope, receive, send):
+        with anyio.CancelScope() as cancel_scope:
+            cancel_scopes.append(cancel_scope)
+            await app(scope, receive, send)
+
+    comm = await _connect_route(cancellable_app, _TUNNEL_PATH)
     await _send_hello_and_wait(comm, registry)
     await asyncio.wait_for(entered.wait(), timeout=budget(1.0))
     helpers = [
@@ -613,17 +624,26 @@ async def test_host_tunnel_cancel_during_connect_callback_cleans_up_workers(db_u
             f"host-ping:{_HOST_ID}",
             f"host-receive:{_HOST_ID}",
             f"host-heartbeat:{_HOST_ID}",
+            "tunnel-diagnostics",
         }
     ]
-    assert len(helpers) == 4
+    assert len(helpers) == 5
     try:
-        comm.future.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await comm.future
+        if cancellation == "task":
+            comm.future.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await comm.future
+        else:
+            # ASGI middleware can keep cancelling at every await during teardown.
+            cancel_scopes[0].cancel()
+            await comm.wait(timeout=budget(2.0))
         assert all(task.done() for task in helpers)
         assert registry.get(_HOST_ID) is None
-        assert not store.is_online(_HOST_ID)
+        persisted = HostStore(db_uri).get_host(_HOST_ID)
+        assert persisted is not None and persisted.status == "offline"
     finally:
+        comm.stop(exceptions=False)
+        await asyncio.gather(comm.future, return_exceptions=True)
         for task in helpers:
             task.cancel()
         await asyncio.gather(*helpers, return_exceptions=True)
