@@ -279,9 +279,7 @@ def _harness_availability_core(harness: str) -> HarnessAvailability:
         # duplicate that, less actionably. So cursor keeps its single key check.
         from omnigent.onboarding.cursor_auth import cursor_api_key_configured
 
-        if cursor_api_key_configured() or os.environ.get("CURSOR_API_KEY"):
-            return True
-        return HARNESS_NEEDS_AUTH
+        return cursor_api_key_configured() or bool(os.environ.get("CURSOR_API_KEY"))
     if canonical == COPILOT_KEY:
         # Copilot runs in-process via the ``github-copilot-sdk`` package (the
         # SDK bundles the CLI binary it drives, so there is no separate binary to
@@ -303,9 +301,7 @@ def _harness_availability_core(harness: str) -> HarnessAvailability:
             return True
         # A ``gh auth login`` session is a usable Copilot credential, so a
         # logged-in user is ready without pasting a token into setup.
-        if gh_cli_github_token(copilot_github_host()) is not None:
-            return True
-        return HARNESS_NEEDS_AUTH
+        return gh_cli_github_token(copilot_github_host()) is not None
     if (
         canonical not in _HARNESS_FAMILY
         and canonical not in _PI_HARNESSES
@@ -332,8 +328,8 @@ def _harness_availability_core(harness: str) -> HarnessAvailability:
     if availability is not True:
         return availability
     credential_check = _FAMILY_CREDENTIAL_CHECK.get(install_key)
-    if credential_check is not None and not credential_check():
-        return HARNESS_NEEDS_AUTH
+    if credential_check is not None:
+        return credential_check()
     return True
 
 
