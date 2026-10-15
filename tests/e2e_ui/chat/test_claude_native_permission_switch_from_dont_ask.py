@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import subprocess
 import time
 from collections.abc import Iterator
 
@@ -22,12 +21,7 @@ import websockets
 from playwright.sync_api import Page, expect
 
 from tests._helpers.async_thread import run_in_fresh_loop
-from tests.e2e_ui.conftest import (
-    _create_native_claude_session,
-    _ensure_runner_online,
-    _server_state,
-    _temp_omnigent_mock_config,
-)
+from tests.e2e_ui.conftest import native_claude_mock_session_context
 
 _TARGET_MODE = "acceptEdits"
 _TARGET_LABEL = "Accept edits"
@@ -47,25 +41,13 @@ def native_claude_dont_ask_session(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[tuple[str, str]]:
     """A real Claude CLI launched into ``dontAsk`` against the mock provider."""
-    respawned = _ensure_runner_online(live_server, tmp_path_factory)
-    runner_id = str(_server_state["runner_id"])
-    with _temp_omnigent_mock_config(
-        mock_llm_server_url, "claude", workflow_owned=bool(_server_state.get("workflow_owned"))
-    ):
-        session_id = _create_native_claude_session(
-            live_server, runner_id, terminal_launch_args=["--permission-mode", "dontAsk"]
-        )
-        try:
-            yield (live_server, session_id)
-        finally:
-            httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
-            if respawned is not None:
-                respawned.terminate()
-                try:
-                    respawned.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    respawned.kill()
-                    respawned.wait(timeout=5)
+    with native_claude_mock_session_context(
+        live_server,
+        mock_llm_server_url,
+        tmp_path_factory,
+        terminal_launch_args=["--permission-mode", "dontAsk"],
+    ) as session:
+        yield session
 
 
 def _terminal_id(base_url: str, session_id: str) -> str | None:
@@ -109,6 +91,7 @@ def _wait_for_footer(base_url: str, session_id: str, footer: str, timeout_s: flo
     """Poll the rendered terminal until its mode footer contains *footer*; return the screen."""
     deadline = time.monotonic() + timeout_s
     screen = ""
+    last_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
             terminal_id = _terminal_id(base_url, session_id)
@@ -116,11 +99,13 @@ def _wait_for_footer(base_url: str, session_id: str, footer: str, timeout_s: flo
                 screen = _render_terminal(base_url, session_id, terminal_id)
                 if footer in screen.lower():
                     return screen
-        except (httpx.HTTPError, websockets.WebSocketException, OSError):
+        except (httpx.HTTPError, websockets.WebSocketException, OSError) as exc:
             # The terminal is still booting; keep polling until the deadline.
-            pass
+            last_error = exc
         time.sleep(1.0)
-    raise AssertionError(f"terminal never rendered {footer!r}; last screen:\n{screen}")
+    raise AssertionError(
+        f"terminal never rendered {footer!r}; last error: {last_error!r}; last screen:\n{screen}"
+    )
 
 
 @pytest.mark.nightly

@@ -156,6 +156,9 @@ _PANE_POLL_INTERVAL_S = 2.0
 # whose mode it does not know (a server older than this bridge). Unlike a
 # transport failure, the rejection does not clear on its own.
 _UNSUPPORTED_PERMISSION_MODE_STATUSES = frozenset({400, 422})
+# Pause before offering a rejected mode again, so a server upgraded under a
+# live runner picks the observation up without a footer change.
+_REJECTED_PERMISSION_MODE_RETRY_S = 300.0
 # Bound on the per-session ring of already-relayed /btw exchange keys. The
 # overlay persists (and stacks history) across polls, so a handful of keys
 # covers a session's side chats while keeping the dedupe set small.
@@ -881,9 +884,11 @@ class _ForwardDedupeState:
     # survive retries, including a switch back to the last posted mode.
     observed_permission_mode: str | None = None
     permission_mode_change_pending: bool = False
-    # Mode the server rejected as unsupported; skipped until the pane shows
-    # another mode, so a mixed-version deployment is not re-posted every poll.
+    # Mode the server rejected as unsupported, skipped until the pane shows
+    # another mode or the retry deadline passes, so a mixed-version
+    # deployment is not re-posted every poll.
     rejected_permission_mode: str | None = None
+    rejected_permission_mode_retry_at: float = 0.0
     # Monotonic deadline before which the next pane capture is skipped, so the
     # single ``capture-pane`` subprocess (feeding both the permission-mode and
     # /btw signals) spawns at _PANE_POLL_INTERVAL_S, not every poll.
@@ -5923,7 +5928,8 @@ async def _relay_permission_mode(
     label, so with nothing posted the web picker has no mode to render and
     hides itself. Best-effort and idempotent — an unchanged or unreadable
     (``None``) mode is a no-op, and a failed POST is retried next poll. A mode
-    the server rejects as unsupported is not retried until the footer changes.
+    the server rejects as unsupported is retried only after a pause, or as
+    soon as the footer changes.
 
     Only a change between readable observations establishes a selection.
     A switch before the first readable footer is indistinguishable from a
@@ -5941,7 +5947,9 @@ async def _relay_permission_mode(
         dedupe.rejected_permission_mode = None
     dedupe.observed_permission_mode = mode
     if mode == dedupe.rejected_permission_mode:
-        return
+        if time.monotonic() < dedupe.rejected_permission_mode_retry_at:
+            return
+        dedupe.rejected_permission_mode = None
     if mode == dedupe.posted_permission_mode and not dedupe.permission_mode_change_pending:
         return
     try:
@@ -5951,27 +5959,25 @@ async def _relay_permission_mode(
             mode=mode,
             initial_observation=not dedupe.permission_mode_change_pending,
         )
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in _UNSUPPORTED_PERMISSION_MODE_STATUSES:
+    except httpx.HTTPError as exc:
+        if (
+            isinstance(exc, httpx.HTTPStatusError)
+            and exc.response.status_code in _UNSUPPORTED_PERMISSION_MODE_STATUSES
+        ):
             dedupe.rejected_permission_mode = mode
+            dedupe.rejected_permission_mode_retry_at = (
+                time.monotonic() + _REJECTED_PERMISSION_MODE_RETRY_S
+            )
             _logger.warning(
                 "external_permission_mode_change rejected by the server (HTTP %s); "
-                "session=%s mode=%s — not re-posting until the footer changes",
+                "session=%s mode=%s — retrying in %.0fs or when the footer changes",
                 exc.response.status_code,
                 session_id,
                 mode,
+                _REJECTED_PERMISSION_MODE_RETRY_S,
                 extra={"session_id": session_id},
             )
             return
-        _logger.debug(
-            "external_permission_mode_change post failed; session=%s mode=%s",
-            session_id,
-            mode,
-            exc_info=True,
-            extra={"session_id": session_id},
-        )
-        return
-    except httpx.HTTPError:
         _logger.debug(
             "external_permission_mode_change post failed; session=%s mode=%s",
             session_id,

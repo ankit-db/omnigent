@@ -608,8 +608,8 @@ async def test_relay_permission_mode_stops_reposting_a_mode_the_server_rejects()
     A runner that reads ``dontAsk`` can report to a server whose read-back
     set predates it, which rejects the report as invalid input. Unlike a 503
     that will clear, re-posting would fail on every pane poll for the life
-    of the session, so the relay waits for the footer to change. The next
-    mode is still reported as the switch it is.
+    of the session, so the relay pauses before trying again. A changed footer
+    is still reported right away as the switch it is.
     """
     dedupe = forwarder._ForwardDedupeState()
     posts: list[dict[str, Any]] = []
@@ -639,7 +639,7 @@ async def test_relay_permission_mode_stops_reposting_a_mode_the_server_rejects()
         assert dedupe.posted_permission_mode is None
         assert dedupe.rejected_permission_mode == "dontAsk"
 
-        # The same footer on later polls is not re-posted.
+        # The same footer on later polls is not re-posted during the pause.
         await _relay("dontAsk")
         await _relay("dontAsk")
         assert len(posts) == 1
@@ -648,6 +648,60 @@ async def test_relay_permission_mode_stops_reposting_a_mode_the_server_rejects()
         await _relay("default")
         assert posts[-1]["data"] == {"permission_mode": "default", "initial_observation": False}
         assert dedupe.posted_permission_mode == "default"
+        assert dedupe.rejected_permission_mode is None
+
+
+@pytest.mark.asyncio
+async def test_relay_permission_mode_retries_a_rejected_mode_after_the_pause() -> None:
+    """
+    A rejected mode is offered again once the pause passes, so an upgrade lands.
+
+    The server can be upgraded under a live runner; with the footer unchanged,
+    only a later retry can bring the read-back up to date.
+    """
+    dedupe = forwarder._ForwardDedupeState()
+    posts: list[dict[str, Any]] = []
+    reject = {"dontAsk"}
+
+    def _handle_request(request: httpx.Request) -> httpx.Response:
+        """Reject the modes in ``reject``; accept the rest."""
+        payload = json.loads(request.content.decode("utf-8"))
+        posts.append(payload)
+        if payload["data"]["permission_mode"] in reject:
+            return httpx.Response(400, json={"error": {"code": "invalid_input"}})
+        return httpx.Response(202, json={})
+
+    transport = httpx.MockTransport(_handle_request)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+
+        async def _relay(mode: str | None) -> None:
+            """Run one permission-mode relay pass for the given pane mode."""
+            await forwarder._relay_permission_mode(
+                client,
+                session_id="conv_abc",
+                mode=mode,
+                dedupe=dedupe,
+            )
+
+        await _relay("dontAsk")
+        await _relay("dontAsk")
+        assert len(posts) == 1
+        assert dedupe.rejected_permission_mode_retry_at > 0.0
+
+        # Still rejected after the pause: one more attempt, then a new pause.
+        dedupe.rejected_permission_mode_retry_at = 0.0
+        await _relay("dontAsk")
+        assert len(posts) == 2
+        assert dedupe.rejected_permission_mode == "dontAsk"
+        await _relay("dontAsk")
+        assert len(posts) == 2
+
+        # The server now knows the mode: the next attempt lands as the launch mode.
+        reject.clear()
+        dedupe.rejected_permission_mode_retry_at = 0.0
+        await _relay("dontAsk")
+        assert posts[-1]["data"] == {"permission_mode": "dontAsk", "initial_observation": True}
+        assert dedupe.posted_permission_mode == "dontAsk"
         assert dedupe.rejected_permission_mode is None
 
 
