@@ -232,23 +232,6 @@ def main() -> int:
     args = parser.parse_args()
 
     pull = gh_json(["api", f"repos/{args.repository}/pulls/{args.pr_number}"])
-    if (
-        os.environ.get("DEPENDABOT_AUTOMERGE_MODE") == "merge"
-        and pull.get("user", {}).get("login") == "dependabot[bot]"
-    ):
-        from dependabot_automerge import evaluate
-
-        try:
-            candidate = evaluate(
-                args.repository,
-                args.pr_number,
-                os.environ.get("EXPECTED_HEAD") or pull["head"]["sha"],
-            )
-        except (ValueError, KeyError, OSError, subprocess.CalledProcessError) as exc:
-            print(f"Dependabot pilot requires human review: {exc}")
-        else:
-            print(f"Dependabot patch policy satisfied: {', '.join(candidate['packages'])}")
-            return 0
     reviews = paginated(f"repos/{args.repository}/pulls/{args.pr_number}/reviews")
     commits = paginated(f"repos/{args.repository}/pulls/{args.pr_number}/commits")
     timeline = paginated(f"repos/{args.repository}/issues/{args.pr_number}/timeline")
@@ -268,6 +251,23 @@ def main() -> int:
     if decision.approved:
         print(decision.reason)
         return 0
+    if (
+        os.environ.get("DEPENDABOT_AUTOMERGE_MODE") == "merge"
+        and (pull.get("user") or {}).get("login") == "dependabot[bot]"
+    ):
+        from dependabot_automerge import evaluate
+
+        try:
+            candidate = evaluate(
+                args.repository,
+                args.pr_number,
+                os.environ.get("EXPECTED_HEAD") or pull["head"]["sha"],
+            )
+        except (ValueError, KeyError, TypeError, OSError, subprocess.CalledProcessError) as exc:
+            print(f"Dependabot pilot requires human review: {exc}")
+        else:
+            print(f"Dependabot patch policy satisfied: {', '.join(candidate['packages'])}")
+            return 0
     print(f"::error::{decision.reason}")
     return 1
 

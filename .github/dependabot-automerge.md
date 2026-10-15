@@ -81,6 +81,11 @@ packages remain visible in the report and do not block the pilot. This rule
 controls unattended merging; maintainers can still review an upgrade that
 does not qualify.
 
+The worker enforces this advisory policy; a green Security Scan alone does
+not certify it. A maintainer merging directly must inspect the Trivy report.
+Switching back to report mode does not invalidate existing check results;
+rerun Security Scan and Maintainer Approval to restore their normal behavior.
+
 GitHub continues to enforce `Merge Ready` and `Maintainer Approval`. The worker
 uses `--match-head-commit` and never uses an admin bypass or queues native
 auto-merge for later. It rechecks PR state, labels, reviews, and base/head

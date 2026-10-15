@@ -5,10 +5,12 @@ from __future__ import annotations
 import base64
 import copy
 import importlib.util
+import io
 import json
 import os
 import subprocess
 import sys
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -90,12 +92,12 @@ def api():
                 }
             ],
         }
-    for workflow in ("ci.yml", "lint.yml", "trivy.yml"):
+    for run_id, workflow in enumerate(("trivy.yml", "ci.yml", "lint.yml"), start=11):
         routes[
             f"{PREFIX}/actions/workflows/{workflow}/runs?head_sha={HEAD}&event=pull_request&per_page=100"
         ] = {
             "workflow_runs": [
-                {"id": 11, "head_sha": HEAD, "status": "completed", "conclusion": "success"}
+                {"id": run_id, "head_sha": HEAD, "status": "completed", "conclusion": "success"}
             ]
         }
     routes[f"{PREFIX}/actions/runs/11/artifacts?per_page=100"] = {
@@ -160,7 +162,7 @@ args = sys.argv[1:]
 with (root / 'calls.jsonl').open('a') as log:
     log.write(json.dumps(args) + '\\n')
 if args[:2] == ['pr', 'list']:
-    print('[{"number":123}]')
+    print(json.dumps(data.get('pulls', [{'number': 123}])))
 elif args[:2] == ['pr', 'merge']:
     assert os.environ['GH_TOKEN'] == 'test-merge-token'
     assert args == ['pr', 'merge', '123', '--repo', 'example/project',
@@ -170,6 +172,11 @@ elif args[0] == 'api':
     assert os.environ['GH_TOKEN'] == 'test-only'
     endpoint = args[1]
     if endpoint.endswith('/artifacts/12/zip'):
+        count = sum(json.loads(line) == args
+                    for line in (root / 'calls.jsonl').read_text().splitlines())
+        if count == 1 and 'first_artifact' in data:
+            sys.stdout.buffer.write(base64.b64decode(data['first_artifact']))
+            sys.exit(0)
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, 'w') as archive:
             archive.writestr('trivy-results.json', json.dumps(data['report']))
@@ -194,7 +201,11 @@ import io, json, os, urllib.request
 from pathlib import Path
 def fixture_urlopen(url, timeout):
     assert url == 'https://pypi.org/pypi/ruff/0.15.2/json'
-    data = json.loads((Path(os.environ['PILOT_FIXTURES']) / 'api.json').read_text())
+    root = Path(os.environ['PILOT_FIXTURES'])
+    (root / 'pypi-called').touch()
+    data = json.loads((root / 'api.json').read_text())
+    if data.get('pypi_timeout'):
+        raise TimeoutError('simulated PyPI timeout')
     return io.BytesIO(json.dumps(data['pypi']).encode())
 urllib.request.urlopen = fixture_urlopen
 """)
@@ -261,11 +272,57 @@ def test_merge_uses_exact_head_after_completed_reports(tmp_path, api):
     assert "Merged after policy" in process.stdout
 
 
-def test_security_workflow_step_emits_the_policy_decision(tmp_path, api):
-    process, calls = run_cli(tmp_path, api, mode="merge", scan=True)
+@pytest.mark.parametrize("candidate", ["eligible", "held", "not_evaluated"])
+def test_security_workflow_step_emits_the_policy_decision(tmp_path, api, candidate):
+    eligible = ""
+    if candidate != "not_evaluated":
+        if candidate == "held":
+            api["routes"][f"{PREFIX}/pulls/123"]["labels"] = [{"name": "hold-automerge"}]
+        process, calls = run_cli(tmp_path, api, mode="merge", scan=True)
+        assert process.returncode == 0, process.stdout + process.stderr
+        eligible = "true" if candidate == "eligible" else "false"
+        assert (tmp_path / "outputs").read_text() == f"eligible={eligible}\n"
+        assert not any(call[:2] == ["pr", "merge"] for call in calls)
+
+    workflow = yaml.safe_load((ROOT / ".github/workflows/security-scan.yml").read_text())
+    audit = next(
+        s for s in workflow["jobs"]["scan"]["steps"] if s["name"] == "OSV advisory scan (uv.lock)"
+    )
+    assert audit["if"] == "${{ steps.gate.outputs.scan == 'true' }}"
+    assert audit["env"]["DEPENDABOT_ELIGIBLE"] == "${{ steps.dependabot.outputs.eligible }}"
+    (tmp_path / "changed.txt").write_text("uv.lock\n")
+    for name, command in (
+        ("uv", "printf 'ruff==0.15.2\\n'"),
+        ("uvx", 'echo "$*" >> "$GITHUB_WORKSPACE/audit-calls"'),
+    ):
+        stub = tmp_path / name
+        stub.write_text(f"#!/bin/sh\n{command}\n")
+        stub.chmod(0o755)
+    # Keep the production shell's temporary requirements files inside this scenario.
+    script = audit["run"].replace("/tmp/uv-req", str(tmp_path / "uv-req"))
+    process = subprocess.run(
+        ["bash", "-e", "-c", script],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            GITHUB_WORKSPACE=str(tmp_path),
+            DEPENDABOT_ELIGIBLE=eligible,
+        ),
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
     assert process.returncode == 0, process.stdout + process.stderr
-    assert (tmp_path / "outputs").read_text() == "eligible=true\n"
-    assert not any(call[:2] == ["pr", "merge"] for call in calls)
+    audit_calls = tmp_path / "audit-calls"
+    if candidate == "eligible":
+        assert not audit_calls.exists()
+        assert "Trivy policy is enforced by the merge worker" in process.stdout
+    else:
+        assert audit_calls.read_text().splitlines() == [
+            f"pip-audit --requirement {tmp_path}/uv-req.txt --no-deps",
+            f"pip-audit --requirement {tmp_path}/uv-req-ag.txt --no-deps",
+        ]
 
 
 def test_merge_mode_never_falls_back_to_workflow_token(tmp_path, api):
@@ -288,13 +345,44 @@ def test_candidate_changed_during_scanning_is_not_merged(tmp_path, api, change):
     assert not any(call[:2] == ["pr", "merge"] for call in calls)
 
 
-@pytest.mark.parametrize("mode,expected", [("report", 1), ("merge", 0)])
+@pytest.mark.parametrize(
+    "mode,fault,expected",
+    [
+        ("report", None, 1),
+        ("merge", None, 0),
+        ("merge", "hold", 1),
+        ("merge", "ghost", 1),
+        ("merge", "timestamp", 1),
+        ("merge", "timeout", 1),
+    ],
+)
 def test_real_approval_entry_point_preserves_review_unless_pilot_enabled(
-    tmp_path, api, mode, expected
+    tmp_path, api, mode, fault, expected
 ):
+    if fault == "hold":
+        api["routes"][f"{PREFIX}/pulls/123"]["labels"] = [{"name": "hold-automerge"}]
+    elif fault == "ghost":
+        api["routes"][f"{PREFIX}/pulls/123"]["user"] = None
+    elif fault == "timestamp":
+        api["pypi"]["urls"][0]["upload_time_iso_8601"] = "2020-01-01T00:00:00"
+    elif fault == "timeout":
+        api["pypi_timeout"] = True
     process, calls = run_cli(tmp_path, api, mode=mode, approval=True)
     assert process.returncode == expected, process.stdout + process.stderr
+    if expected:
+        assert "awaiting approval from a maintainer" in process.stdout
     assert not any(call[:2] == ["pr", "merge"] for call in calls)
+
+
+def test_human_approval_does_not_depend_on_pypi(tmp_path, api):
+    api["routes"][f"{PREFIX}/pulls/123/reviews?per_page=100&page=1"] = [
+        {"user": {"login": "maintainer"}, "state": "APPROVED", "commit_id": HEAD}
+    ]
+    api["pypi_timeout"] = True
+    process, _calls = run_cli(tmp_path, api, mode="merge", approval=True)
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert "Current head approved" in process.stdout
+    assert not (tmp_path / "pypi-called").exists()
 
 
 @pytest.mark.parametrize(
@@ -311,6 +399,8 @@ def test_real_approval_entry_point_preserves_review_unless_pilot_enabled(
         "head",
         "review",
         "hash",
+        "size",
+        "null_files",
         "yanked",
         "young",
     ],
@@ -341,6 +431,10 @@ def test_ineligible_changes_keep_human_review(tmp_path, api, fault):
         ]
     elif fault == "hash":
         api["pypi"]["urls"][0]["digests"]["sha256"] = "different"
+    elif fault == "size":
+        api["pypi"]["urls"][0]["size"] += 1
+    elif fault == "null_files":
+        api["routes"][f"{PREFIX}/pulls/123/files?per_page=100&page=1"] = None
     elif fault == "yanked":
         api["pypi"]["urls"][0]["yanked"] = True
     elif fault == "young":
@@ -416,6 +510,34 @@ def test_changed_package_with_medium_advisory_can_merge(tmp_path, api):
     process, calls = run_cli(tmp_path, api, mode="merge", sweep=True)
     assert process.returncode == 0, process.stderr
     assert calls[-1][:2] == ["pr", "merge"]
+
+
+@pytest.mark.parametrize("fault", ["zip", "deflate", "null_files"])
+def test_bad_candidate_does_not_stop_later_merges(tmp_path, api, fault):
+    api["pulls"] = [{"number": 122}, {"number": 123}]
+    for endpoint, value in list(api["routes"].items()):
+        if "/pulls/123" in endpoint:
+            api["routes"][endpoint.replace("/pulls/123", "/pulls/122")] = copy.deepcopy(value)
+    if fault == "null_files":
+        api["routes"][f"{PREFIX}/pulls/122/files?per_page=100&page=1"] = None
+    else:
+        data = b"not a zip file"
+        if fault == "deflate":
+            buffer = io.BytesIO()
+            filename = "trivy-results.json"
+            with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(filename, json.dumps(api["report"]))
+            damaged = bytearray(buffer.getvalue())
+            damaged[30 + len(filename)] = 7  # Invalid DEFLATE block type.
+            data = bytes(damaged)
+        api["first_artifact"] = base64.b64encode(data).decode()
+    process, calls = run_cli(tmp_path, api, mode="merge", sweep=True)
+    assert process.returncode == 0, process.stdout + process.stderr
+    summary = (tmp_path / "summary").read_text()
+    assert "#122: human review or retry required" in summary
+    assert "#123: eligible" in summary
+    assert "Merged after policy" in summary
+    assert [call[2] for call in calls if call[:2] == ["pr", "merge"]] == ["123"]
 
 
 @pytest.mark.parametrize(

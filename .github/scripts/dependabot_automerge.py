@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import zipfile
+import zlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
@@ -185,7 +186,7 @@ def require_reports(repository: str, head: str, packages: list[str]) -> None:
         )
     # Require actual CI completion, even if Merge Ready treats an absent
     # path-filtered check as skippable while its workflow is being created.
-    latest = None
+    completed_runs = {}
     for workflow in ("ci.yml", "lint.yml", "trivy.yml"):
         query = urlencode({"head_sha": head, "event": "pull_request", "per_page": 100})
         response = gh_json(
@@ -200,8 +201,10 @@ def require_reports(repository: str, head: str, packages: list[str]) -> None:
             and latest["conclusion"] == "success",
             f"Latest {workflow} run did not succeed",
         )
+        completed_runs[workflow] = latest
+    trivy_run = completed_runs["trivy.yml"]
     artifacts = gh_json(
-        ["api", f"repos/{repository}/actions/runs/{latest['id']}/artifacts?per_page=100"]
+        ["api", f"repos/{repository}/actions/runs/{trivy_run['id']}/artifacts?per_page=100"]
     )
     require(artifacts["total_count"] <= 100, "Trivy artifact listing is incomplete")
     reports = [
@@ -215,8 +218,11 @@ def require_reports(repository: str, head: str, packages: list[str]) -> None:
         check=True,
         capture_output=True,
     ).stdout
-    with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        require_advisory_policy(json.loads(archive.read("trivy-results.json")), packages)
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            require_advisory_policy(json.loads(archive.read("trivy-results.json")), packages)
+    except (zipfile.BadZipFile, zlib.error) as exc:
+        raise NeedsReview(f"Trivy repository report is unreadable: {exc}") from exc
 
 
 def sweep(repository: str, mode: str) -> None:
@@ -292,7 +298,7 @@ def sweep(repository: str, mode: str) -> None:
                     env=dict(os.environ, GH_TOKEN=os.environ["DEPENDABOT_MERGE_TOKEN"]),
                 )
                 rows.append("  - Merged after policy and required checks passed.")
-        except (NeedsReview, KeyError, ValueError, OSError, subprocess.CalledProcessError) as exc:
+        except (KeyError, TypeError, ValueError, OSError, subprocess.CalledProcessError) as exc:
             rows.append(f"- #{number}: human review or retry required: {exc}")
     summary = "\n".join(rows) + "\n"
     print(summary)
@@ -316,7 +322,7 @@ def main() -> int:
         decision = evaluate(args.repository, args.pr_number, args.expected_head)
         print(json.dumps(decision))
         eligible = "true"
-    except (NeedsReview, KeyError, ValueError, OSError, subprocess.CalledProcessError) as exc:
+    except (KeyError, TypeError, ValueError, OSError, subprocess.CalledProcessError) as exc:
         print(f"Human review required: {exc}")
         eligible = "false"
     if path := os.environ.get("GITHUB_OUTPUT"):

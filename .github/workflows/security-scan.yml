@@ -160,9 +160,15 @@ jobs:
         # to avoid blocking PRs when main's baseline lockfile already has open
         # advisories on main.
         # Eligible pilot updates use completed Trivy reports at merge time.
-        if: ${{ steps.gate.outputs.scan == 'true' && steps.dependabot.outputs.eligible != 'true' }}
+        if: ${{ steps.gate.outputs.scan == 'true' }}
+        env:
+          DEPENDABOT_ELIGIBLE: ${{ steps.dependabot.outputs.eligible }}
         working-directory: pr
         run: |
+          if [ "$DEPENDABOT_ELIGIBLE" = "true" ]; then
+            echo "Eligible Dependabot update; Trivy policy is enforced by the merge worker."
+            exit 0
+          fi
           if ! grep -qxF 'uv.lock' "$GITHUB_WORKSPACE/changed.txt"; then
             echo "uv.lock not changed; skipping OSV scan."
             exit 0
