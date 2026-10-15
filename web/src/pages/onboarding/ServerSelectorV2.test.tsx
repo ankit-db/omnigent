@@ -118,7 +118,7 @@ describe("ServerSelectorV2", () => {
       />,
     );
     fireEvent.pointerDown(screen.getByRole("button", { name: /choose team url/i }), { button: 0 });
-    fireEvent.click(screen.getByRole("menuitemradio", { name: "Old (old.example.com)" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "https://old.example.com/" }));
     expect(onConnect).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Join your team (old.example.com)" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("rejected");

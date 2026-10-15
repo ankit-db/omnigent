@@ -20,12 +20,10 @@ import type { ConnectProgress } from "@/pages/onboarding/ServerSelectorV2";
 import { ConnectStatus } from "@/pages/onboarding/primitives";
 import { ownServerName } from "@/lib/serverNames";
 
-/** Team name for a preset server URL: the host's first label, capitalized
- *  ("https://team.example.com/x" → "Team"). */
+/** Team name for a preset server URL: the host's first label. */
 function teamName(url: string): string {
   const host = url.replace(/^https?:\/\//i, "").replace(/[/?#].*$/, "");
-  const label = host.split(".")[0] || host;
-  return label.charAt(0).toUpperCase() + label.slice(1);
+  return host.split(".")[0] || host;
 }
 
 function displayUrl(url: string): string {
@@ -157,7 +155,10 @@ export function LandingStep({
             <DropdownMenuContent align="end" style={{ width: menuWidth }}>
               <DropdownMenuRadioGroup value={selectedUrl} onValueChange={setSelection}>
                 {servers.map((url) => {
-                  const name = nameOf(url) ?? ownServerName(serverNames, url) ?? teamName(url);
+                  const name =
+                    nameOf(url) ??
+                    ownServerName(serverNames, url) ??
+                    (managedServers.includes(url) ? teamName(url) : null);
                   return (
                     <Fragment key={url}>
                       {url === firstRecent && (
