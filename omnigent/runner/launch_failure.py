@@ -324,20 +324,38 @@ def diagnose_codex_model_rejection(message: str) -> FailureDiagnosis | None:
     )
 
 
-# The provider's model-not-found text (e.g. Claude Code's "There's an issue with
-# the selected model (<id>)..."). Narrow on purpose, so unrelated 404s, auth,
+# Provider model-not-found shapes, matched narrowly so unrelated 404s, auth,
 # rate-limit, and budget failures keep their own handling.
+# Claude Code: "There's an issue with the selected model (<id>). It may not exist..."
 _MODEL_UNAVAILABLE_MARKER = "issue with the selected model"
+# Anthropic's not-found body for an unknown model id, as a harness forwards it:
+# `404 {"type":"error","error":{"type":"not_found_error","message":"model: <id>"}}`.
+_ANTHROPIC_MODEL_NOT_FOUND = re.compile(r'"message"\s*:\s*"model:\s*[^"\s]+"')
+_NOT_FOUND_STATUS = re.compile(r"\b404\b|not_found_error")
+# OpenAI's rejection of an unknown or inaccessible model id.
+_OPENAI_MODEL_NOT_FOUND = re.compile(
+    r'"code"\s*:\s*"model_not_found"|does not exist or you do not have access to it',
+    re.IGNORECASE,
+)
+
+
+def _is_model_unavailable(message: str) -> bool:
+    if _MODEL_UNAVAILABLE_MARKER in message.lower():
+        return True
+    if _OPENAI_MODEL_NOT_FOUND.search(message):
+        return True
+    return bool(_NOT_FOUND_STATUS.search(message) and _ANTHROPIC_MODEL_NOT_FOUND.search(message))
 
 
 def diagnose_model_unavailable(message: str) -> FailureDiagnosis | None:
     """Explain a provider rejecting the selected model, with a recovery hint.
 
-    The in-process SDK path gets no next step from the harness, unlike the
-    Claude Code CLI, which appends its own ``/model`` hint. Returns ``None``
-    when the marker is absent.
+    Applies where the harness forwards the provider's rejection without a next
+    step: the in-process SDK path and Pi's forwarded ``Pi model error: 404 …``
+    item. Claude Code appends its own ``/model`` hint. Returns ``None`` for
+    anything that is not a model-not-found rejection.
     """
-    if _MODEL_UNAVAILABLE_MARKER not in message.lower():
+    if not _is_model_unavailable(message):
         return None
     return FailureDiagnosis(
         title="Model unavailable",

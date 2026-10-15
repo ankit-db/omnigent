@@ -459,6 +459,15 @@ def test_codex_model_rejection_ignores_unrelated_errors(message: str) -> None:
         "inner executor error: There's an issue with the selected model "
         "(openai/example-model). It may not exist or you may not have access to it.",
         "There's an issue with the selected model. It may not exist.",
+        # Anthropic's not-found body, forwarded verbatim by Pi.
+        'Pi model error: 404 {"type":"error","error":{"type":"not_found_error",'
+        '"message":"model: anthropic/claude-opus-4-8"}}',
+        '404 {"type":"error","error":{"type":"invalid_request_error",'
+        '"message": "model: claude-opus-4-8"}}',
+        # OpenAI's rejection of an unknown or inaccessible model id.
+        '404 {"error":{"message":"The model `gpt-5-nano` does not exist or you do not have '
+        'access to it.","type":"invalid_request_error","param":null,"code":"model_not_found"}}',
+        '{"error":{"message":"unknown model","code":"model_not_found"}}',
     ],
 )
 def test_model_unavailable_explains_how_to_recover(message: str) -> None:
@@ -489,6 +498,16 @@ def test_model_unavailable_explains_how_to_recover(message: str) -> None:
         "The AI gateway refused this turn because a spending budget is exhausted.",
         "The 'future-model' model is not supported when using Codex with a ChatGPT account.",
         _CLIENT_UPDATE_OUTPUT,
+        # A 404 that does not name a model (e.g. a wrong base URL path).
+        'Pi model error: 404 {"type":"error","error":{"type":"not_found_error",'
+        '"message":"Not Found"}}',
+        # Other provider statuses mentioning the model stay unlabeled.
+        'Pi model error: 401 {"type":"error","error":{"type":"authentication_error",'
+        '"message":"invalid x-api-key"}}',
+        'Pi model error: 400 {"type":"error","error":{"type":"invalid_request_error",'
+        '"message":"model: claude-opus-4-8 does not support the messages API"}}',
+        'Pi model error: 429 {"type":"error","error":{"type":"rate_limit_error",'
+        '"message":"model: claude-opus-4-8 is rate limited"}}',
     ],
 )
 def test_model_unavailable_ignores_unrelated_errors(message: str) -> None:
