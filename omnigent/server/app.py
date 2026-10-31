@@ -58,6 +58,7 @@ from omnigent.server.background_session_titles import (
 )
 from omnigent.server.managed_hosts import ManagedSandboxConfig
 from omnigent.server.mcp_pool import ServerMcpPool
+from omnigent.server.mobile_notifications import build_mobile_notification_service
 from omnigent.server.performance_metrics import (
     ServerMetricsOtelPublisher,
     ServerPerformanceMetrics,
@@ -73,6 +74,7 @@ from omnigent.server.routes.default_policies import create_default_policies_rout
 from omnigent.server.routes.dictation import create_dictation_router
 from omnigent.server.routes.harnesses import create_harnesses_router
 from omnigent.server.routes.imports import create_imports_router
+from omnigent.server.routes.mobile_notifications import create_mobile_notifications_router
 from omnigent.server.routes.policy_registry import create_policy_registry_router
 from omnigent.server.routes.projects import create_projects_router
 from omnigent.server.routes.runner_tunnel import create_runner_tunnel_router
@@ -1312,6 +1314,7 @@ def create_app(
     # ``ServerMcpPool.__init__`` is synchronous and safe to call outside
     # a running event loop.
     _mcp_pool = ServerMcpPool()
+    mobile_notifications = build_mobile_notification_service(conversation_store=conversation_store)
     server_metrics = ServerPerformanceMetrics()
     server_metrics_otel = ServerMetricsOtelPublisher()
 
@@ -1494,9 +1497,11 @@ def create_app(
             # endpoints (see routes/scheduled_tasks.py); there is no startup
             # sweep and no periodic reconcile.
 
+        await mobile_notifications.start()
         try:
             yield
         finally:
+            await mobile_notifications.stop()
             # Run completion is event-driven (the _publish_status hook) plus a
             # lazy-on-read stale backstop — there is no run-reconciler task to
             # cancel. Only the per-job scheduler holds timers that need stopping.
@@ -2250,6 +2255,13 @@ def create_app(
         )
         return {"user_id": user_id, "is_admin": is_admin}
 
+    app.include_router(
+        create_mobile_notifications_router(
+            service=mobile_notifications, auth_provider=auth_provider
+        ),
+        prefix="/v1",
+        tags=["notifications"],
+    )
     app.include_router(
         create_sessions_router(
             conversation_store,

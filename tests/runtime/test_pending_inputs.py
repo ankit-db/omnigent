@@ -25,6 +25,7 @@ route tests; this file tests the module in isolation.
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Iterator
 
 import pytest
@@ -91,6 +92,39 @@ def test_snapshot_returns_deep_copies() -> None:
 
     # Re-read: the index still holds the original text, not "mutated".
     assert pending_inputs.snapshot_for("conv_a")[0]["content"] == [_text_block("orig")]
+
+
+@pytest.mark.parametrize("match_text", [False, True], ids=["fifo", "kiro"])
+def test_record_copies_submitted_blocks_before_forwarding(match_text: bool) -> None:
+    """Forwarding mutations must not change snapshot, matching, or restored content."""
+    content = [
+        {
+            "type": "input_file",
+            "file_id": "file_real",
+            "filename": "Omni native attachment.txt",
+            "metadata": {"source": "upload"},
+        },
+        _text_block("Read the attached text file..."),
+    ]
+    original = copy.deepcopy(content)
+    pid = pending_inputs.record("conv_a", content, created_by="alice@example.com")
+
+    content[0]["metadata"]["source"] = "resolved"
+    content[1]["text"] = "expanded file contents and changed runner text"
+    content.append(_text_block("runner-only context"))
+
+    assert pending_inputs.snapshot_for("conv_a") == [
+        {"pending_id": pid, "content": original, "created_by": "alice@example.com"}
+    ]
+    drained = (
+        pending_inputs.resolve_matching_text("conv_a", "Read the attached text file...").matched
+        if match_text
+        else pending_inputs.resolve_oldest("conv_a")
+    )
+    assert drained is not None
+    assert drained.pending_id == pid
+    assert drained.content == original
+    assert drained.created_by == "alice@example.com"
 
 
 def test_resolve_oldest_drains_fifo_and_returns_entry() -> None:

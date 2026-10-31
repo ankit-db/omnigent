@@ -58,6 +58,20 @@ _subscribers: dict[
 ] = {}
 _lock = threading.Lock()
 
+_publish_observers: set[Callable[[str, dict[str, Any]], None]] = set()
+
+
+def add_publish_observer(observer: Callable[[str, dict[str, Any]], None]) -> Callable[[], None]:
+    """Observe lifecycle events without a client; return an unsubscribe hook."""
+    with _lock:
+        _publish_observers.add(observer)
+
+    def remove() -> None:
+        with _lock:
+            _publish_observers.discard(observer)
+
+    return remove
+
 
 def _enqueue_or_overflow(
     queue: asyncio.Queue[dict[str, Any] | object],
@@ -133,6 +147,12 @@ def publish(conversation_id: str, event: dict[str, Any]) -> None:
         return
     with _lock:
         subs = list(_subscribers.get(conversation_id, ()))
+        observers = list(_publish_observers)
+    for observer in observers:
+        try:
+            observer(conversation_id, event)
+        except Exception:
+            _logger.warning("Session event observer failed")
     for queue, loop in subs:
         loop.call_soon_threadsafe(_enqueue_or_overflow, queue, event)
 

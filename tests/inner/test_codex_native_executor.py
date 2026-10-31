@@ -330,18 +330,23 @@ def test_image_block_is_sent_as_local_image_not_inline_base64(
     )
 
 
-def test_input_file_text_is_inlined_as_a_text_item(
+@pytest.mark.parametrize(
+    ("filename", "label"),
+    [(None, '"attachment.txt"'), ("notes.txt", '"notes.txt"'), ("a\nb.txt", '"a\\nb.txt"')],
+)
+def test_input_file_text_is_inlined_as_a_named_attachment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    filename: str | None,
+    label: str,
 ) -> None:
     """
     A textual ``input_file`` is decoded and inlined as a ``text`` item.
 
     The Codex app-server has no file input item, so a ``text/*`` file is
-    decoded from its data URI and sent inline as text. Proves the
-    decoded content reaches the turn input verbatim and that NO
-    ``localImage`` item is produced for a file. A failure means a text
-    file was dropped or mis-routed to the image channel.
+    decoded from its data URI and labeled so the model can distinguish
+    the attachment from the user's prompt. The filename stays on one
+    line and the content reaches the model unchanged.
     """
     _FakeCodexNativeClient.requests = []
     _FakeCodexNativeClient.created = []
@@ -363,11 +368,15 @@ def test_input_file_text_is_inlined_as_a_text_item(
     executor = CodexNativeExecutor(bridge_dir=tmp_path)
     file_text = "line one\nline two\n"
     data_uri = "data:text/plain;base64," + base64.b64encode(file_text.encode()).decode()
+    block = {"type": "input_file", "file_data": data_uri}
+    if filename is not None:
+        block["filename"] = filename
+    prompt = {"type": "input_text", "text": "Read the attached text file."}
 
     async def run() -> None:
         """Drive one turn carrying a single text ``input_file`` block."""
         async for _event in executor.run_turn(
-            [{"role": "user", "content": [{"type": "input_file", "file_data": data_uri}]}],
+            [{"role": "user", "content": [block, prompt]}],
             [],
             "",
         ):
@@ -378,8 +387,13 @@ def test_input_file_text_is_inlined_as_a_text_item(
     method, params = _FakeCodexNativeClient.requests[-1]
     assert method == "turn/start"
     items = params["input"]
-    # The decoded file content is inlined as text, verbatim.
-    assert items == [{"type": "text", "text": file_text}]
+    assert items == [
+        {
+            "type": "text",
+            "text": f"Contents of attached file {label}:\n{file_text}\nEnd of attached file.",
+        },
+        {"type": "text", "text": prompt["text"]},
+    ]
     # No image channel item for a file, and no uploads dir written.
     assert all(item["type"] != "localImage" for item in items)
     assert not (tmp_path / "uploads").exists()

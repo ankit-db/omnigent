@@ -419,7 +419,7 @@ async def _best_effort_stop(
     try:
         descendant_ids = await _collect_descendant_conversation_ids(conversation_store, session_id)
         status = _session_status_with_child_rollup(session_id, descendant_ids)
-    except Exception:  # noqa: BLE001
+    except Exception:
         _logger.debug(
             "Best-effort stop failed for %s; proceeding anyway",
             session_id,
@@ -433,7 +433,7 @@ async def _best_effort_stop(
     async def _stop(target_id: str) -> None:
         try:
             await _stop_session_via_runner(target_id, runner_router)
-        except Exception:  # noqa: BLE001
+        except Exception:
             _logger.debug(
                 "Best-effort stop failed for %s; proceeding anyway",
                 target_id,
@@ -1715,11 +1715,8 @@ async def _persist_external_conversation_item(
     :returns: Store-assigned conversation item id.
     """
     item = _parse_external_conversation_item(body)
-    # A native user message round-tripping back from the transcript:
-    # drain its optimistic pending-input entry (FIFO) and fold the
-    # entry's file blocks (image / file) into the item BEFORE persisting.
-    # The transcript is text-only, so without this the image is dropped
-    # from durable history and disappears on every reload / navigation.
+    # Restore submitted attachment blocks before persisting the native echo;
+    # the transcript can drop files and expand their contents into prompt text.
     cleared_pending_id: str | None = None
     skipped_kiro_pending: list[pending_inputs.DrainedInput] = []
     if (
@@ -1737,7 +1734,13 @@ async def _persist_external_conversation_item(
             drained = pending_inputs.resolve_oldest(session_id)
         if drained is not None:
             cleared_pending_id = drained.pending_id
-            item = _merge_pending_file_blocks(item, drained.content)
+            if any(
+                isinstance(block, dict) and block.get("type") in ("input_image", "input_file")
+                for block in drained.content
+            ):
+                item = item.model_copy(
+                    update={"data": item.data.model_copy(update={"content": drained.content})}
+                )
             # Apply the original sender's identity recorded at POST time.
             # The transcript forwarder is the single writer here and has no
             # auth context, so the persisted item would otherwise have
@@ -5981,7 +5984,7 @@ async def _handle_mcp_tools_call(
         )
         exec_resp.raise_for_status()
         exec_data = exec_resp.json()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         _logger.warning("Runner MCP execute failed: %s", exc, exc_info=True)
         return _mcp_error_response(rpc_id, -32000, "Runner MCP execute failed.")
 
@@ -6046,7 +6049,7 @@ async def _handle_mcp_tools_call(
             )
             retry_resp.raise_for_status()
             exec_data = retry_resp.json()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger.warning("Runner MCP retry failed: %s", exc, exc_info=True)
             return _mcp_error_response(rpc_id, -32000, "Runner MCP retry failed.")
         if "error" in exec_data:

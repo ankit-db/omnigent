@@ -109,7 +109,7 @@ class CodexNativeExecutor(Executor):
                         "input": input_items,
                     },
                 )
-            except Exception:  # noqa: BLE001 - steering is best-effort from the runner facade.
+            except Exception:
                 _logger.warning("Codex native turn/steer failed", exc_info=True)
                 return False
             finally:
@@ -163,7 +163,7 @@ class CodexNativeExecutor(Executor):
                         "turn/interrupt",
                         {"threadId": state.thread_id, "turnId": ""},
                     )
-                except Exception:  # noqa: BLE001 - the local cancel above already took effect.
+                except Exception:
                     _logger.warning("Codex native MCP startup interrupt failed", exc_info=True)
                 _logger.info("Codex native MCP startup cancelled: %s", ", ".join(pending))
             if state.active_turn_id is not None:
@@ -449,8 +449,8 @@ def _file_block_to_input_item(block: dict[str, Any], bridge_dir: Path) -> dict[s
     Convert an ``input_file`` block into a Codex input item.
 
     The Codex app-server has no native file input item, so a textual
-    file (``text/*``) is inlined as a ``text`` item. A binary file is
-    materialized to disk and referenced by path in a ``text`` item so
+    file (``text/*``) is inlined with its filename in a ``text`` item.
+    A binary file is materialized to disk and referenced by path so
     the model can open it with its tools. This keeps multi-megabyte
     base64 payloads out of the turn's text input.
 
@@ -458,9 +458,8 @@ def _file_block_to_input_item(block: dict[str, Any], bridge_dir: Path) -> dict[s
         ``file_data`` data URI, e.g.
         ``"data:text/plain;base64,aGVsbG8="``.
     :param bridge_dir: Bridge directory for materializing the file.
-    :returns: A Codex ``text`` input item; a visible could-not-load
-        marker item when the file failed to materialize; or ``None``
-        for an empty text file.
+    :returns: A Codex ``text`` input item, or a visible could-not-load
+        marker item when the file failed to materialize.
     """
     file_data = block.get("file_data")
     if isinstance(file_data, str) and file_data.startswith("data:"):
@@ -468,7 +467,15 @@ def _file_block_to_input_item(block: dict[str, Any], bridge_dir: Path) -> dict[s
             parsed = parse_data_uri(file_data)
             if parsed.mime_type.startswith("text/"):
                 text = base64.b64decode(parsed.base64_payload).decode("utf-8", errors="replace")
-                return {"type": "text", "text": text} if text else None
+                filename = json.dumps(
+                    str(block.get("filename") or "attachment.txt"), ensure_ascii=False
+                )
+                return {
+                    "type": "text",
+                    "text": (
+                        f"Contents of attached file {filename}:\n{text}\nEnd of attached file."
+                    ),
+                }
         except (ValueError, base64.binascii.Error):
             _logger.warning("Failed to decode input_file data URI", exc_info=True)
     path = materialize_attachment(block, bridge_dir)

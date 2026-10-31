@@ -1493,25 +1493,12 @@ async def test_external_meta_user_message_persists_without_live_input_event(
     assert published == []
 
 
-async def test_external_user_message_folds_pending_image_into_durable_item(
+@pytest.mark.parametrize("block_type", ["input_image", "input_file"])
+async def test_external_user_message_restores_pending_attachment_in_durable_item(
     client: httpx.AsyncClient,
+    block_type: str,
 ) -> None:
-    """
-    Regression: a native web message's image survives in durable history.
-
-    The native transcript mirrors a user message back text-only
-    (``external_conversation_item`` with no image block), so the image —
-    which the client uploaded and POSTed — would be dropped from
-    conversation history and vanish on every reload. The pending-input
-    entry recorded at web-POST time still carries the image block (with
-    its real ``file_id``); when the transcript item persists, the server
-    folds that block into the durable item.
-
-    Here we seed the pending entry directly (standing in for the prior
-    native web POST), then post the text-only transcript mirror and
-    assert the persisted item carries BOTH the image block and the text.
-    Without the fold, the stored item is text-only and the image is gone.
-    """
+    """Reloaded history retains attachments and typed text without native markers."""
     from omnigent.runtime import pending_inputs
 
     pending_inputs.reset_for_tests()
@@ -1524,7 +1511,7 @@ async def test_external_user_message_folds_pending_image_into_durable_item(
         session["id"],
         [
             {
-                "type": "input_image",
+                "type": block_type,
                 "file_id": "b08c893483887826e2b9f67165106700",
                 "filename": "diagram.png",
             },
@@ -1556,14 +1543,13 @@ async def test_external_user_message_folds_pending_image_into_durable_item(
 
         items = (await client.get(f"/v1/sessions/{session['id']}/items")).json()["data"]
         user_msg = next(item for item in items if item["type"] == "message")
-        # The image block was folded back in, ahead of the transcript text
-        # — so reloading history shows the image, not just the caption.
+        # History restores the uploaded block and original typed text.
         assert user_msg["content"][0] == {
-            "type": "input_image",
+            "type": block_type,
             "file_id": "b08c893483887826e2b9f67165106700",
             "filename": "diagram.png",
         }
-        expected_text = "[Attached: /tmp/diagram.png]\n\nexplain this diagram"
+        expected_text = "explain this diagram"
         assert user_msg["content"][1]["text"] == expected_text
         # The pending entry was drained — it won't double-render on rebind.
         assert pending_inputs.snapshot_for(session["id"]) == []

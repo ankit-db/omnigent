@@ -3656,6 +3656,93 @@ async def test_kiro_native_dispatch_clears_pending_when_injection_fails() -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("wrapper", ["claude-code-native-ui", "codex-native-ui", "kiro-native-ui"])
+@pytest.mark.parametrize("block_type", ["input_file", "input_image"])
+async def test_native_attachment_echo_restores_submitted_blocks(
+    monkeypatch: pytest.MonkeyPatch, wrapper: str, block_type: str
+) -> None:
+    """Native echoes retain submitted text, attachment order, and sender provenance."""
+    from omnigent.runtime import pending_inputs
+    from omnigent.server.routes.sessions import (
+        _dispatch_session_event_to_runner,
+        _persist_external_conversation_item,
+    )
+
+    pending_inputs.reset_for_tests()
+    published: list[dict[str, Any]] = []
+    monkeypatch.setattr(session_stream, "publish", lambda sid, event: published.append(event))
+    store = _ConversationStore()
+    session_id = "64a784c3aa907d1774f44313546947c6"
+    conv = store.get_conversation(session_id)
+    assert conv is not None
+    conv.labels["omnigent.wrapper"] = wrapper
+    content = [
+        {"type": "input_text", "text": "Read the attached text file..."},
+        {"type": block_type, "file_id": "file_real", "filename": "Omni native attachment.txt"},
+        {"type": "input_text", "text": "\n  Keep the answer brief.\n"},
+    ]
+    body = SessionEventInput(type="message", data={"role": "user", "content": content})
+    client = _FakeRunnerClient()
+
+    try:
+        dispatched = await _dispatch_session_event_to_runner(
+            session_id,
+            conv,
+            body,
+            store,
+            client,
+            agent_name=wrapper,
+            file_store=None,
+            artifact_store=None,
+            created_by="alice@example.com",
+            native_terminal_ready=True,
+        )
+        assert dispatched.pending_id is not None
+        assert store.appended_items == []
+        assert pending_inputs.snapshot_for(session_id)[0]["content"] == content
+
+        await _persist_external_conversation_item(
+            session_id,
+            conv,
+            SessionEventInput(
+                type="external_conversation_item",
+                data={
+                    "item_type": "message",
+                    "item_data": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": 'Contents of attached file "Omni native attachment.txt":\n'
+                                "expanded file contents\n"
+                                'End of attached file "Omni native attachment.txt".\n'
+                                "Read the attached text file...\n"
+                                "Keep the answer brief.",
+                            }
+                        ],
+                    },
+                    "response_id": "native:accepted-prompt",
+                },
+            ),
+            store,
+            created_by="forwarder@example.com",
+        )
+
+        [persisted] = store.appended_items
+        assert persisted.data.content == content
+        assert persisted.response_id == "native:accepted-prompt"
+        assert persisted.created_by == "alice@example.com"
+        assert pending_inputs.snapshot_for(session_id) == []
+        consumed = [event for event in published if event["type"] == "session.input.consumed"]
+        assert len(consumed) == 1
+        assert consumed[0]["data"]["cleared_pending_id"] == dispatched.pending_id
+        assert consumed[0]["data"]["data"]["content"] == content
+        assert consumed[0]["data"]["created_by"] == "alice@example.com"
+    finally:
+        pending_inputs.reset_for_tests()
+
+
+@pytest.mark.asyncio
 async def test_kiro_external_prompt_matches_pending_and_reports_skipped_input() -> None:
     """A failed Kiro prompt must not make the next prompt clear the wrong pending input."""
     from omnigent.runtime import pending_inputs
@@ -3670,9 +3757,13 @@ async def test_kiro_external_prompt_matches_pending_and_reports_skipped_input() 
         [{"type": "input_text", "text": "!!!! XOXOX !!!!"}],
         created_by="alice@example.com",
     )
+    submitted = [
+        {"type": "input_file", "file_id": "file_joke", "filename": "joke.txt"},
+        {"type": "input_text", "text": "tell me a joke"},
+    ]
     second = pending_inputs.record(
         "823dbd1aab969b5a813fac59bb977a77",
-        [{"type": "input_text", "text": "tell me a joke"}],
+        submitted,
         created_by="alice@example.com",
     )
     body = SessionEventInput(
@@ -3681,7 +3772,7 @@ async def test_kiro_external_prompt_matches_pending_and_reports_skipped_input() 
             "item_type": "message",
             "item_data": {
                 "role": "user",
-                "content": [{"type": "input_text", "text": "tell me a joke"}],
+                "content": [{"type": "input_text", "text": "file contents\n\ntell me a joke"}],
             },
             "response_id": "kiro:prompt-joke",
         },
@@ -3704,7 +3795,7 @@ async def test_kiro_external_prompt_matches_pending_and_reports_skipped_input() 
         assert skipped_user.created_by == "alice@example.com"
         assert skipped_error.data.code == "kiro_native_prompt_not_recorded"
         assert matched_user.data.role == "user"
-        assert matched_user.data.content == [{"type": "input_text", "text": "tell me a joke"}]
+        assert matched_user.data.content == submitted
         assert matched_user.created_by == "alice@example.com"
         assert first != second
     finally:

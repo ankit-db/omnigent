@@ -103,10 +103,9 @@ class DrainedInput:
         matching optimistic bubble by id.
     :param content: The drained entry's message content blocks, e.g.
         ``[{"type": "input_image", "file_id": "file_x", "filename":
-        "a.png"}, {"type": "input_text", "text": "hi"}]``. The caller
-        merges the file blocks into the durably-persisted item, since
-        the native transcript round-trip is text-only and would
-        otherwise drop the image from history.
+        "a.png"}, {"type": "input_text", "text": "hi"}]``. For attachments,
+        the caller restores these submitted blocks in the durable item;
+        the native transcript can drop files and expand their contents into text.
     :param created_by: Authenticated identity of the user who posted
         the message, e.g. ``"alice@example.com"``. ``None`` when the
         entry was recorded before this field was introduced or when
@@ -142,7 +141,7 @@ class _Entry:
     :param content: The message content blocks exactly as POSTed, e.g.
         ``[{"type": "input_text", "text": "hi"}]`` (file blocks carry
         real ``file_id``s, since the client uploads before POSTing).
-        Replayed verbatim into the snapshot.
+        Copied at record time and replayed verbatim into the snapshot.
     :param created_by: Authenticated identity of the posting actor,
         e.g. ``"alice@example.com"``. ``None`` when unknown. Persisted
         through to the committed item so ``session.input.consumed``
@@ -214,7 +213,7 @@ def record(
     :returns: The index-assigned pending id, e.g. ``"pending_a1b2c3"``.
     """
     pending_id = f"pending_{uuid.uuid4().hex}"
-    entry = _Entry(pending_id=pending_id, content=content, created_by=created_by)
+    entry = _Entry(pending_id=pending_id, content=copy.deepcopy(content), created_by=created_by)
     with _lock:
         _evict_stale_locked(conversation_id, entry.created_at)
         _pending.setdefault(conversation_id, {})[pending_id] = entry
@@ -256,9 +255,8 @@ def resolve_oldest(conversation_id: str) -> DrainedInput | None:
     markers) in ways a text match can't survive.
 
     Returns the drained entry (id + content) so the caller can echo the
-    id to clients AND merge its file blocks into the durable item — the
-    transcript is text-only, so the image would otherwise vanish from
-    history. Returns ``None`` when nothing is pending — e.g. a message
+    id to clients AND restore its submitted blocks in the durable item when
+    it has attachments. Returns ``None`` when nothing is pending — e.g. a message
     typed directly in the TUI on a session with no queued web messages;
     the caller then renders it as a plain committed item.
 
